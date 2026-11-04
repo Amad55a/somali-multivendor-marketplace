@@ -1,10 +1,5 @@
-pipeline {
+﻿pipeline {
     agent any
-
-    environment {
-        PATH+NODE = 'C:\\Program Files\\nodejs'
-        PATH+GIT = 'C:\\Program Files\\Git\\cmd'
-    }
 
     stages {
         stage('Checkout') {
@@ -15,35 +10,31 @@ pipeline {
 
         stage('Environment') {
             steps {
-                powershell '''
-                    node --version
-                    npm --version
-                    git --version
-                '''
+                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && node --version && npm.cmd --version && git --version'
             }
         }
 
         stage('Install dependencies') {
             steps {
-                powershell 'npm ci'
+                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npm.cmd ci'
             }
         }
 
         stage('Lint') {
             steps {
-                powershell 'npm run lint'
+                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npm.cmd run lint'
             }
         }
 
         stage('TypeScript') {
             steps {
-                powershell 'npx tsc --noEmit'
+                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npx.cmd tsc --noEmit'
             }
         }
 
         stage('Production build') {
             steps {
-                powershell 'npm run build'
+                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npm.cmd run build'
             }
         }
     }
