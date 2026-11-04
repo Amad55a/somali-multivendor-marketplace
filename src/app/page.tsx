@@ -9,7 +9,7 @@ const featureCards = [
   },
   {
     title: "Secure checkout",
-    text: "Simple and testinhfhfg, safe payment flows built for modern online commerce and repeat buying.",
+    text: "Simple and testinhfhfgdg, safe payment flows built for modern online commerce and repeat buying.",
   },
 ];
 
