@@ -1,0 +1,197 @@
+
+// Somali Multi-Vendor Marketplace
+// Phase 1 + Phase 2: Foundation and Authentication Security
+// PostgreSQL + Prisma 7
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum AccountType {
+  CUSTOMER
+  VENDOR
+  ADMIN
+}
+
+enum AuthProvider {
+  LOCAL
+  AMAZON
+}
+
+enum VerificationPurpose {
+  EMAIL_VERIFY
+  ADMIN_LOGIN
+  PASSWORD_RESET
+}
+
+// ==========================================
+// 1. USERS
+// ==========================================
+
+model User {
+  id              String      @id @default(uuid()) @db.Uuid
+  email           String      @db.VarChar(254)
+  normalizedEmail String      @db.VarChar(254)
+  accountType     AccountType
+  emailVerifiedAt DateTime?   @db.Timestamptz(6)
+  isActive        Boolean     @default(true)
+  createdAt       DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(6)
+
+  authAccounts           UserAuthAccount[]
+  sessions               UserSession[]
+  auditLogs              AuditLog[] @relation("AuditActor")
+  emailVerificationCodes EmailVerificationCode[]
+  adminMfaMethod         AdminMfaMethod?
+  adminRecoveryCodes     AdminRecoveryCode[]
+  loginAttempts          LoginAttempt[]
+
+  @@unique([accountType, normalizedEmail])
+  @@index([email])
+  @@index([accountType, isActive])
+  @@map("users")
+}
+
+// ==========================================
+// 2. USER AUTHENTICATION ACCOUNTS
+// ==========================================
+
+model UserAuthAccount {
+  id                String       @id @default(uuid()) @db.Uuid
+  userId            String       @db.Uuid
+  provider          AuthProvider
+  providerAccountId String?      @db.VarChar(255)
+  passwordHash      String?      @db.VarChar(255)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime     @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("user_auth_accounts")
+}
+
+// ==========================================
+// 3. USER SESSIONS
+// ==========================================
+
+model UserSession {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @db.Uuid
+  sessionTokenHash String    @unique @db.VarChar(255)
+  lastActivityAt   DateTime  @default(now()) @db.Timestamptz(6)
+  expiresAt        DateTime  @db.Timestamptz(6)
+  revokedAt        DateTime? @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+// ==========================================
+// 4. AUDIT LOGS
+// ==========================================
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  actorUserId String?  @db.Uuid
+  action      String   @db.VarChar(100)
+  entityType  String   @db.VarChar(100)
+  entityId    String?  @db.Uuid
+  metadata    Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  actor User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId, createdAt])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ==========================================
+// 5. EMAIL VERIFICATION CODES
+// ==========================================
+
+model EmailVerificationCode {
+  id        String             @id @default(uuid()) @db.Uuid
+  userId    String             @db.Uuid
+  codeHash  String             @db.VarChar(255)
+  purpose   VerificationPurpose
+  expiresAt DateTime           @db.Timestamptz(6)
+  usedAt    DateTime?          @db.Timestamptz(6)
+  createdAt DateTime           @default(now()) @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose, expiresAt])
+  @@index([expiresAt])
+  @@map("email_verification_codes")
+}
+
+// ==========================================
+// 6. ADMIN MFA METHODS
+// ==========================================
+
+model AdminMfaMethod {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @unique @db.Uuid
+  encryptedSecret String    @db.VarChar(1024)
+  enabled         Boolean   @default(false)
+  verifiedAt      DateTime? @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("admin_mfa_methods")
+}
+
+// ==========================================
+// 7. ADMIN RECOVERY CODES
+// ==========================================
+
+model AdminRecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  codeHash  String    @db.VarChar(255)
+  usedAt    DateTime? @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@map("admin_recovery_codes")
+}
+
+// ==========================================
+// 8. LOGIN ATTEMPTS
+// ==========================================
+
+model LoginAttempt {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String?  @db.Uuid
+  identifier  String   @db.VarChar(254)
+  ipAddress   String?  @db.VarChar(45)
+  successful  Boolean  @default(false)
+  attemptedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([identifier, attemptedAt])
+  @@index([userId, attemptedAt])
+  @@index([ipAddress, attemptedAt])
+  @@map("login_attempts")
+}
