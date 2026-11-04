@@ -10,31 +10,31 @@
 
         stage('Environment') {
             steps {
-                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && node --version && npm.cmd --version && git --version'
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && node --version && npm.cmd --version && git --version'
             }
         }
 
         stage('Install dependencies') {
             steps {
-                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npm.cmd ci'
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd ci'
             }
         }
 
         stage('Lint') {
             steps {
-                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npm.cmd run lint'
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd run lint'
             }
         }
 
         stage('TypeScript') {
             steps {
-                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npx.cmd tsc --noEmit'
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npx.cmd tsc --noEmit'
             }
         }
 
         stage('Production build') {
             steps {
-                bat 'set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%" && npm.cmd run build'
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd run build'
             }
         }
     }
