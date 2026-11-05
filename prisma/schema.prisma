@@ -33,6 +33,23 @@ enum VerificationPurpose {
   PASSWORD_RESET
 }
 
+enum VendorApplicationStatus {
+  DRAFT
+  PENDING
+  UNDER_REVIEW
+  NEEDS_INFORMATION
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum VendorVerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
 // ==========================================
 // 1. USERS
 // ==========================================
@@ -53,8 +70,12 @@ model User {
   emailVerificationCodes EmailVerificationCode[]
   adminMfaMethod         AdminMfaMethod?
   adminRecoveryCodes     AdminRecoveryCode[]
+  adminLoginChallenges   AdminLoginChallenge[]
   loginAttempts          LoginAttempt[]
+  vendorProfile          VendorProfile?
+  reviewedVendorProfiles VendorProfile[] @relation("VendorProfileReviewer")
 
+  @@unique([id, accountType])
   @@unique([accountType, normalizedEmail])
   @@index([email])
   @@index([accountType, isActive])
@@ -68,15 +89,16 @@ model User {
 model UserAuthAccount {
   id                String       @id @default(uuid()) @db.Uuid
   userId            String       @db.Uuid
+  accountType       AccountType
   provider          AuthProvider
   providerAccountId String?      @db.VarChar(255)
   passwordHash      String?      @db.VarChar(255)
   createdAt         DateTime     @default(now()) @db.Timestamptz(6)
   updatedAt         DateTime     @updatedAt @db.Timestamptz(6)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId, accountType], references: [id, accountType], onDelete: Cascade)
 
-  @@unique([provider, providerAccountId])
+  @@unique([provider, providerAccountId, accountType])
   @@index([userId])
   @@map("user_auth_accounts")
 }
@@ -176,6 +198,22 @@ model AdminRecoveryCode {
   @@map("admin_recovery_codes")
 }
 
+// Short-lived, one-use challenges issued only after admin password and email OTP checks.
+model AdminLoginChallenge {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.VarChar(64)
+  expiresAt DateTime  @db.Timestamptz(6)
+  usedAt    DateTime? @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+  @@map("admin_login_challenges")
+}
+
 // ==========================================
 // 8. LOGIN ATTEMPTS
 // ==========================================
@@ -194,4 +232,39 @@ model LoginAttempt {
   @@index([userId, attemptedAt])
   @@index([ipAddress, attemptedAt])
   @@map("login_attempts")
+}
+
+// A vendor profile is also the vendor's onboarding application.
+model VendorProfile {
+  id                     String                    @id @default(uuid()) @db.Uuid
+  userId                 String                    @unique @db.Uuid
+  accountType            AccountType                @default(VENDOR)
+  applicationStatus      VendorApplicationStatus    @default(DRAFT)
+  verificationStatus     VendorVerificationStatus  @default(UNVERIFIED)
+  businessName           String?                   @db.VarChar(200)
+  storeName              String?                   @db.VarChar(120)
+  businessType           String?                   @db.VarChar(100)
+  description            String?                   @db.VarChar(2000)
+  contactName            String?                   @db.VarChar(160)
+  phone                  String?                   @db.VarChar(32)
+  country                String?                   @db.VarChar(100)
+  region                 String?                   @db.VarChar(100)
+  city                   String?                   @db.VarChar(100)
+  address                String?                   @db.VarChar(300)
+  marketAssociation      String?                   @db.VarChar(200)
+  submittedAt            DateTime?                 @db.Timestamptz(6)
+  reviewedAt             DateTime?                 @db.Timestamptz(6)
+  reviewedById           String?                   @db.Uuid
+  rejectionReason        String?                   @db.VarChar(1000)
+  informationRequest     String?                   @db.VarChar(1000)
+  createdAt              DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                  @updatedAt @db.Timestamptz(6)
+
+  user       User  @relation(fields: [userId, accountType], references: [id, accountType], onDelete: Cascade)
+  reviewedBy User? @relation("VendorProfileReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@unique([userId, accountType])
+  @@index([applicationStatus, submittedAt])
+  @@index([reviewedById, reviewedAt])
+  @@map("vendor_profiles")
 }

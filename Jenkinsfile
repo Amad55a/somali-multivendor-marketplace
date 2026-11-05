@@ -24,21 +24,40 @@ pipeline {
             }
         }
 
+        stage('Generate Prisma client') {
+            steps {
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd run prisma:generate'
+            }
+        }
+
         stage('Lint') {
             steps {
                 bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd run lint'
             }
         }
 
+        stage('Unit tests') {
+            steps {
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd test'
+            }
+        }
+
         stage('TypeScript') {
             steps {
-                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npx.cmd tsc --noEmit'
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd run typecheck'
             }
         }
 
         stage('Production build') {
             steps {
                 bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd run build'
+            }
+        }
+
+        stage('Browser end-to-end tests') {
+            steps {
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npx.cmd playwright install chromium'
+                bat 'set "PATH=C:/Program Files/nodejs;C:/Program Files/Git/cmd;%PATH%" && npm.cmd run test:e2e'
             }
         }
     }
