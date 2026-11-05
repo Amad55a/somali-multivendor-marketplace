@@ -1,0 +1,75 @@
+# Application architecture
+
+## Current implementation
+
+- Next.js App Router, strict TypeScript, PostgreSQL, Prisma ORM 7, and Zod validation.
+- Customer/vendor authentication, Amazon OAuth, email verification, password reset, session revocation, administrator OTP/TOTP/recovery-code flows, and vendor onboarding/review are implemented.
+- The application has a single access JWT held in an HttpOnly cookie; it does not implement refresh tokens.
+- API route dispatch is handled by `src/app/api/v1/[...segments]/route.ts`; the shared registry and request/response contracts are in `src/lib/api/v1.ts`.
+- OpenAPI 3.0.3 is generated from that registry and served at `/api/openapi.json`; Swagger UI is served at `/api-docs`.
+- Prisma models and migrations cover authentication, administrator security, and vendor onboarding only. Products, orders, payments, and other marketplace transaction domains are not implemented.
+- The approved storefront homepage is implemented under `src/features/homepage` and served under the locale routes.
+
+## Boundaries
+
+```text
+src/
+  app/                 Next.js route composition, pages, layouts, and API entry points
+  components/          Shared UI components
+  config/               Validated runtime configuration
+  features/
+    auth/               Authentication, OAuth, email, MFA, OTP, and session services
+    vendors/            Vendor onboarding, review, and related UI
+    homepage/           Approved storefront homepage
+  i18n/                 Locale dictionaries, types, and routing support
+  lib/
+    api/                Shared HTTP response conventions and versioned API registry
+    errors/             Application error types
+    prisma.ts           Server-only shared Prisma client
+prisma/
+  schema.prisma
+  migrations/           Append-only Prisma migrations
+tests/
+  unit/                 Vitest unit and API contract tests
+  integration/          PostgreSQL-backed service/API tests
+  e2e/                  Playwright browser tests
+```
+
+Keep route handlers thin: validate inputs, enforce authentication/authorization, invoke domain services, and serialize results with the shared API response helpers. Services own business rules and transaction boundaries. Do not query Prisma from UI components.
+
+## Frontend and internationalization
+
+- Keep App Router pages and layouts as React Server Components by default. Use Client Components for browser APIs, local state, and event handlers.
+- The homepage is served at `/en` and `/so`; the locale controls server-rendered document language and metadata. `/` redirects using a validated locale preference cookie.
+- Keep user-visible copy in `src/i18n/dictionaries`; `src/i18n/types.ts` enforces dictionary parity and typed translation keys.
+- The language preference is stored in an HTTP-only cookie and changed through a server action; do not use browser storage or hydration-time locale detection.
+- Do not redesign the approved homepage as part of backend work.
+
+## API and security
+
+- All implemented REST endpoints are under `/api/v1`; the authoritative contracts and generated OpenAPI are in `src/lib/api/v1.ts`.
+- Success responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "message": "...", "details"?: [...] } }`. Unknown server failures return a generic error and log only sanitized information.
+- Validate request bodies, query/path parameters, and environment values at system boundaries. Never trust a browser-supplied account type or authorization decision.
+- Session authentication is server-checked against the `UserSession` row. Access credentials are only returned through an HttpOnly cookie. Same-origin checks protect mutating cookie-authenticated requests.
+- Public registration is limited to customers and vendors. Administrators are provisioned through the controlled script, not a public endpoint.
+- Vendor approval is separate from registration. Only authorized admins can review applications, and restricted selling actions must check approved vendor status.
+- Do not expose stack traces, SQL details, credentials, OTPs, OAuth tokens, or provider secrets in API responses or logs.
+
+## Persistence and migrations
+
+- `prisma/schema.prisma` is the application model source of truth; Prisma ORM 7 configuration is in `prisma7.config.ts`.
+- Use `src/lib/prisma.ts` for the shared generated Prisma client and PostgreSQL adapter.
+- The configured development database was compared with the Prisma schema on 2026-11-05: all three migrations were applied and Prisma reported no schema diff. This is not a guarantee about CI, staging, or production.
+- Preserve applied migration history. Make schema changes through new versioned migrations; do not reset a database or use `db push` to bypass migration history.
+- Migration-managed PostgreSQL CHECK constraints for provider account types are not represented in Prisma schema syntax; see the database design document.
+- Keep secrets server-only and validate required environment variables. Never prefix secrets with `NEXT_PUBLIC_` or overwrite `.env` as part of implementation.
+
+## Quality and CI
+
+Available local commands include `npm run lint`, `npm run typecheck`, `npm test`, `npm run test:integration`, `npm run build`, and `npm run test:e2e`. Integration tests require an isolated `TEST_DATABASE_URL`; do not run them against a developer database.
+
+GitHub Actions provisions PostgreSQL 18, applies migrations to its isolated database, and runs Prisma generation, lint, unit tests, backend integration tests, typecheck, production build, and Playwright browser tests.
+
+## Implemented and future domains
+
+Implemented database/API functionality is limited to authentication, administrator security, vendor onboarding, and vendor review. Product/catalogue, inventory, cart, checkout, orders, payments, coupons, returns, reviews, vendor payouts, market records, video calls, and notifications are future work. Do not represent these as existing tables or endpoints until implemented and migrated.

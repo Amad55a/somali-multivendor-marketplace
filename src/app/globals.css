@@ -49,7 +49,7 @@
 }
 
 body {
-  font-family: "Segoe UI", Arial, sans-serif;
+  font-family: var(--font-geist), "Segoe UI", Arial, sans-serif;
 }
 
 :root {
@@ -131,4 +131,43 @@ body {
   html {
     @apply font-sans;
   }
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+html[data-theme="dark"] body,
+html[data-theme="dark"] .site-chrome {
+  background-color: #102722;
+  color: #eef8f3;
+}
+
+html[data-theme="dark"] [class*="bg-white"],
+html[data-theme="dark"] [class*="bg-[#f8faf9]"] {
+  background-color: #173a32 !important;
+}
+
+html[data-theme="dark"] [class*="bg-[#f3f5ff]"],
+html[data-theme="dark"] [class*="bg-[#f8f9ff]"],
+html[data-theme="dark"] [class*="bg-[#edf1ef]"] {
+  background-color: #102722 !important;
+}
+
+html[data-theme="dark"]
+  [class*="text-[#123b35]"]:not([class*="bg-[#f4b942]"]) {
+  color: #eef8f3 !important;
+}
+
+html[data-theme="dark"] [class*="text-slate-400"],
+html[data-theme="dark"] [class*="text-slate-500"],
+html[data-theme="dark"] [class*="text-slate-600"],
+html[data-theme="dark"] [class*="text-slate-700"] {
+  color: #c3d2cb !important;
+}
+
+html[data-theme="dark"] [class*="border-[#e7ece9]"],
+html[data-theme="dark"] [class*="border-[#dce4e1]"],
+html[data-theme="dark"] [class*="border-[#123b35]"] {
+  border-color: #31574e !important;
 }
