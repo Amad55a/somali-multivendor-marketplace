@@ -12,6 +12,7 @@ const mailbox = vi.hoisted(() => ({
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/features/auth/email", () => ({
+  assertEmailDeliveryConfigured: vi.fn(),
   sendOneTimeCode: vi.fn(
     async (email: string, code: string, purpose: string) => {
       mailbox.messages.push({ email, code, purpose });
