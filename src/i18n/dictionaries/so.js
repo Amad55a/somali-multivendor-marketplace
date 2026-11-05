@@ -53,7 +53,7 @@ const dictionary = {
   },
   hero: {
     eyebrow: "Suuqyadaada. Alaabtaada. Adeeg kuu fudud.",
-    title: "Ka adeego suuqyada aad jeceshahay adoo gurigaaga jooga.",
+    title: "Suuqyada aad jeceshahay ee Soomaalida ka adeegso gurigaaga.",
     description:
       "Ka hel alaabooyin tayadoodu sarreyso oo ay iibinayaan ganacsato lagu kalsoon yahay oo ku kala sugan Suuqyada Soomaaliya. Ka adeego adigoo gurigaaga ka bixin.",
     imageAlt:
