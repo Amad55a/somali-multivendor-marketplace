@@ -8,6 +8,12 @@ const mailbox = vi.hoisted(() => ({
     code: string;
     purpose: string;
   }>,
+  vendorMessages: [] as Array<{
+    email: string;
+    event: string;
+    displayName: string;
+    detail?: string;
+  }>,
 }));
 
 vi.mock("server-only", () => ({}));
@@ -16,6 +22,16 @@ vi.mock("@/features/auth/email", () => ({
   sendOneTimeCode: vi.fn(
     async (email: string, code: string, purpose: string) => {
       mailbox.messages.push({ email, code, purpose });
+    },
+  ),
+  sendVendorApplicationEmail: vi.fn(
+    async (email: string, event: string, displayName: string, detail?: string) => {
+      mailbox.vendorMessages.push({
+        email,
+        event,
+        displayName,
+        ...(detail ? { detail } : {}),
+      });
     },
   ),
 }));
@@ -67,6 +83,7 @@ const rateLimitHashes: string[] = [];
 
 beforeEach(() => {
   mailbox.messages.length = 0;
+  mailbox.vendorMessages.length = 0;
 });
 
 afterEach(() => {
@@ -466,6 +483,36 @@ describe("vendor onboarding and admin review", () => {
         "VENDOR_SUSPENDED",
       ]),
     );
+    expect(mailbox.vendorMessages.map(({ event }) => event)).toEqual([
+      "SUBMITTED",
+      "CHANGES_REQUESTED",
+      "SUBMITTED",
+      "REJECTED",
+      "SUBMITTED",
+      "APPROVED",
+    ]);
+    expect(mailbox.vendorMessages.find(({ event }) => event === "REJECTED")).toMatchObject({
+      email: pendingVendor.email,
+      detail: "Business details could not be confirmed.",
+    });
+
+    const notifications = await prisma.adminNotification.findMany({
+      where: { entityId: { in: [pending.application.id, application.application.id] } },
+      select: { entityId: true, type: true, readAt: true },
+    });
+    expect(notifications).toHaveLength(2);
+    expect(notifications).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        entityId: pending.application.id,
+        type: "VENDOR_APPLICATION_SUBMITTED",
+        readAt: null,
+      }),
+      expect.objectContaining({
+        entityId: application.application.id,
+        type: "VENDOR_APPLICATION_SUBMITTED",
+        readAt: null,
+      }),
+    ]));
   });
 
   it("protects admin routes from missing and customer sessions", async () => {
@@ -517,7 +564,7 @@ describe("Amazon OAuth and rate limiting", () => {
       fetchMock,
     );
     expect(customerCallback.status).toBe(303);
-    expect(customerCallback.headers.get("location")).toContain("/en/customer/account");
+    expect(customerCallback.headers.get("location")).toContain("/en/customer/home");
     expect(customerCallback.headers.get("set-cookie")).toContain("marketplace_session=");
 
     const customer = await prisma.user.findUniqueOrThrow({
@@ -529,7 +576,7 @@ describe("Amazon OAuth and rate limiting", () => {
       },
     });
     userIds.push(customer.id);
-    expect(customer.emailVerifiedAt).toBeNull();
+    expect(customer.emailVerifiedAt).toBeInstanceOf(Date);
 
     const customerLogin = await completeAmazonFlow(
       "CUSTOMER",
@@ -538,7 +585,7 @@ describe("Amazon OAuth and rate limiting", () => {
       fetchMock,
     );
     expect(customerLogin.headers.get("set-cookie")).toContain("marketplace_session=");
-    expect(customerLogin.headers.get("location")).toContain("/en/customer/account");
+    expect(customerLogin.headers.get("location")).toContain("/en/customer/home");
 
     const vendorCallback = await completeAmazonFlow(
       "VENDOR",
@@ -557,7 +604,7 @@ describe("Amazon OAuth and rate limiting", () => {
       },
     });
     userIds.push(vendor.id);
-    expect(vendor.emailVerifiedAt).toBeNull();
+    expect(vendor.emailVerifiedAt).toBeInstanceOf(Date);
 
     const identities = await prisma.userAuthAccount.findMany({
       where: { provider: "AMAZON", providerAccountId: amazonId },

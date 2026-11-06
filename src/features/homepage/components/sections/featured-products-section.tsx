@@ -22,16 +22,23 @@ export function FeaturedProductsSection({
   copy,
   illustrationAltPrefix,
   illustrationLabel,
+  search = "",
 }: Readonly<{
   copy: Dictionary["products"];
   illustrationAltPrefix: string;
   illustrationLabel: string;
+  search?: string;
 }>) {
   const [activeFilter, setActiveFilter] = useState<ProductFilter>("all");
-  const products =
-    activeFilter === "all"
-      ? copy.entries
-      : copy.entries.filter((product) => product.filter === activeFilter);
+  const [cartItems, setCartItems] = useState<ProductId[]>([]);
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const products = copy.entries.filter((product) => {
+    const matchesFilter = activeFilter === "all" || product.filter === activeFilter;
+    const matchesSearch =
+      !normalizedSearch ||
+      `${product.name} ${product.seller}`.toLocaleLowerCase().includes(normalizedSearch);
+    return matchesFilter && matchesSearch;
+  });
 
   return (
     <section id="featured-products" className="bg-[#f3f5ff]">
@@ -130,16 +137,24 @@ export function FeaturedProductsSection({
                     </span>
                   ) : null}
                 </div>
-                <span
-                  aria-hidden="true"
-                  className="grid size-8 shrink-0 place-items-center rounded-md bg-[#f4b942] text-[#123b35]"
+                <button
+                  type="button"
+                  title={copy.addToCart}
+                  aria-label={`${copy.addToCart}: ${product.name}`}
+                  onClick={() => setCartItems((items) => [...items, product.id])}
+                  className="grid size-8 shrink-0 place-items-center rounded-md bg-[#f4b942] text-[#123b35] transition hover:bg-[#e8a92f] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#123b35]"
                 >
                   <ShoppingBag className="size-4" />
-                </span>
+                </button>
               </div>
             </article>
           ))}
         </div>
+        {cartItems.length > 0 ? (
+          <p className="mt-5 text-sm font-semibold text-[#123b35]" role="status">
+            {cartItems.length} {copy.addToCart}
+          </p>
+        ) : null}
       </div>
     </section>
   );

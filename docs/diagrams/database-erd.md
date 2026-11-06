@@ -138,7 +138,7 @@ Implemented enums:
 - `AccountType`: `CUSTOMER`, `VENDOR`, `ADMIN`
 - `AuthProvider`: `LOCAL`, `AMAZON`
 - `VerificationPurpose`: `EMAIL_VERIFY`, `ADMIN_LOGIN`, `PASSWORD_RESET`
-- `VendorApplicationStatus`: `DRAFT`, `PENDING`, `UNDER_REVIEW`, `NEEDS_INFORMATION`, `APPROVED`, `REJECTED`, `SUSPENDED`
+- `VendorApplicationStatus`: `DRAFT`, `PENDING`, `UNDER_REVIEW`, `CHANGES_REQUESTED`, `APPROVED`, `REJECTED`, `SUSPENDED`
 - `VendorVerificationStatus`: `UNVERIFIED`, `PENDING`, `VERIFIED`, `REJECTED`
 
 Database-level checks created by migration but not expressible in the current Prisma schema syntax require Amazon auth accounts to use `CUSTOMER`/`VENDOR` and vendor profiles to use `VENDOR`.

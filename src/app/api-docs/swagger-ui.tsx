@@ -67,5 +67,9 @@ function recaptchaAction(url: string, requestBody: unknown): string | null {
   if (path === "/api/v1/vendor/onboarding/submit") {
     return "vendor_onboarding_submit";
   }
+  if (path === "/api/v1/vendor/profile-changes/submit") {
+    return "vendor_profile_change_submit";
+  }
+  if (path === "/api/v1/checkout/simulate") return "checkout_simulate";
   return null;
 }

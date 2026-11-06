@@ -1,23 +1,26 @@
 import { Suspense } from "react";
 import type { Dictionary } from "@/i18n/types";
+import type { Locale } from "@/i18n/config";
+import { FeaturedProductsSection } from "@/features/homepage/components/sections/featured-products-section";
 import { HeroSection } from "@/features/homepage/components/sections/hero-section";
 import { MarketNetworkSection } from "@/features/homepage/components/sections/market-network-section";
 import { DirectSuuqSection } from "@/features/homepage/components/sections/direct-suuq-section";
 import { CategoriesSection } from "@/features/homepage/components/sections/categories-section";
-import { FeaturedProductsSection } from "@/features/homepage/components/sections/featured-products-section";
 import { MerchantStoresSection } from "@/features/homepage/components/sections/merchant-stores-section";
 import { ConfidenceSection } from "@/features/homepage/components/sections/confidence-section";
 
 export function HomePage({
   dictionary,
+  locale,
   searchParams,
 }: Readonly<{
   dictionary: Dictionary;
+  locale: Locale;
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }>) {
   return (
     <main>
-      <HeroSection copy={dictionary.hero} />
+      <HeroSection copy={dictionary.hero} locale={locale} />
       <MarketNetworkSection
         copy={dictionary.markets}
         illustrationAltPrefix={dictionary.illustrationAltPrefix}
@@ -33,11 +36,11 @@ export function HomePage({
       />
       <Suspense
         fallback={
-          <FeaturedProductsSection
-            copy={dictionary.products}
-            illustrationAltPrefix={dictionary.illustrationAltPrefix}
-            illustrationLabel={dictionary.illustrationLabel}
-          />
+          <section className="bg-[#f5f8f6]">
+            <div className="mx-auto max-w-7xl px-4 py-16 text-sm text-slate-500">
+              {dictionary.header.searchLoading}
+            </div>
+          </section>
         }
       >
         <SearchableFeaturedProducts
@@ -59,25 +62,13 @@ async function SearchableFeaturedProducts({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }>) {
   const { q } = await searchParams;
-  const normalizedQuery =
-    typeof q === "string" ? q.trim().toLocaleLowerCase() : "";
-  const products = normalizedQuery
-    ? {
-        ...dictionary.products,
-        entries: dictionary.products.entries.filter((product) =>
-          [product.name, product.seller, product.tag]
-            .join(" ")
-            .toLocaleLowerCase()
-            .includes(normalizedQuery),
-        ),
-      }
-    : dictionary.products;
-
+  const search = typeof q === "string" ? q.trim() : "";
   return (
     <FeaturedProductsSection
-      copy={products}
+      copy={dictionary.products}
       illustrationAltPrefix={dictionary.illustrationAltPrefix}
       illustrationLabel={dictionary.illustrationLabel}
+      search={search}
     />
   );
 }

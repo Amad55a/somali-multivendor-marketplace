@@ -11,6 +11,7 @@ const geist = Geist({
 export const metadata: Metadata = {
   title: "Somsuuq | Somali Marketplace",
   description: "Shop your favourite Somali markets from home.",
+  icons: { icon: "/images/brand/somsuuq-mark.svg" },
 };
 
 export default function HomeLayout({

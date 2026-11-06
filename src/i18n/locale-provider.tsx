@@ -6,10 +6,9 @@ import {
   useContext,
   useMemo,
   useState,
-  useTransition,
   type ReactNode,
 } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { saveLocalePreference } from "@/i18n/save-locale-preference";
 import { isLocale, type Locale } from "@/i18n/config";
 import { createTranslator } from "@/i18n/get-dictionary";
@@ -34,9 +33,8 @@ export function LocaleProvider({
   dictionary: Dictionary;
   children: ReactNode;
 }>) {
-  const router = useRouter();
   const pathname = usePathname();
-  const [isPending, startTransition] = useTransition();
+  const [isChangingLocale, setIsChangingLocale] = useState(false);
   const [changeFailed, setChangeFailed] = useState(false);
   const t = useMemo(() => createTranslator(dictionary), [dictionary]);
 
@@ -48,21 +46,17 @@ export function LocaleProvider({
       if (nextLocale === locale) return;
 
       setChangeFailed(false);
-      startTransition(async () => {
-        try {
-          await saveLocalePreference(nextLocale);
-          const nextPath = pathname.replace(
-            /^\/(en|so)(?=\/|$)/,
-            `/${nextLocale}`,
-          );
-          router.replace(nextPath);
-        } catch (error) {
+      setIsChangingLocale(true);
+      const nextPath = pathname.replace(/^\/(en|so)(?=\/|$)/, `/${nextLocale}`);
+      void saveLocalePreference(nextLocale)
+        .then(() => window.location.assign(nextPath))
+        .catch((error: unknown) => {
           console.error("Unable to save the language preference", error);
           setChangeFailed(true);
-        }
-      });
+          setIsChangingLocale(false);
+        });
     },
-    [locale, pathname, router],
+    [locale, pathname],
   );
 
   const contextValue = useMemo(
@@ -70,10 +64,10 @@ export function LocaleProvider({
       locale,
       t,
       setLocale,
-      isChangingLocale: isPending,
+      isChangingLocale,
       changeError: changeFailed ? t("language.changeError") : null,
     }),
-    [changeFailed, isPending, locale, setLocale, t],
+    [changeFailed, isChangingLocale, locale, setLocale, t],
   );
 
   return (

@@ -37,7 +37,7 @@ enum VendorApplicationStatus {
   DRAFT
   PENDING
   UNDER_REVIEW
-  NEEDS_INFORMATION
+  CHANGES_REQUESTED
   APPROVED
   REJECTED
   SUSPENDED
@@ -50,6 +50,144 @@ enum VendorVerificationStatus {
   REJECTED
 }
 
+enum VendorFileType {
+  STORE_LOGO
+  BUSINESS_LICENSE
+}
+
+enum VendorApplicationEmailEvent {
+  SUBMITTED
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+  PROFILE_CHANGE_SUBMITTED
+  PROFILE_CHANGE_APPROVED
+  PROFILE_CHANGE_REJECTED
+}
+
+enum VendorProfileChangeStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ProductCondition {
+  NEW
+  USED
+  REFURBISHED
+}
+
+enum MarketplaceOrderStatus {
+  PENDING_PAYMENT
+  PAID
+  CANCELLED
+  FULFILLING
+  COMPLETED
+}
+
+enum VendorOrderStatus {
+  NEW
+  CONFIRMED
+  PROCESSING
+  PACKED
+  READY
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  EXPIRED
+}
+
+enum SimulatedPaymentMethod {
+  EVC_PLUS
+  ZAAD
+  EDAHAB
+}
+
+enum StockReservationStatus {
+  ACTIVE
+  CONVERTED
+  EXPIRED
+  RELEASED
+}
+
+enum CouponScope {
+  VENDOR
+  PLATFORM
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum ReturnRequestStatus {
+  REQUESTED
+  VENDOR_APPROVED
+  VENDOR_REJECTED
+  RETURN_SHIPPED
+  ESCALATED
+  ADMIN_APPROVED
+  ADMIN_REJECTED
+  RETURNED
+  RECEIVED
+  REFUND_PROCESSING
+  REFUNDED
+}
+
+enum LedgerEntryType {
+  SALE
+  COMMISSION
+  VENDOR_DISCOUNT
+  PLATFORM_DISCOUNT
+  DELIVERY_FEE
+  REFUND
+  REFUND_ADJUSTMENT
+  PAYOUT
+  ADJUSTMENT
+}
+
+enum PayoutStatus {
+  PENDING
+  APPROVED
+  PROCESSING
+  SIMULATED_PAID
+  FAILED
+  CANCELLED
+}
+
+enum PaymentMode {
+  SIMULATED
+}
+
+enum PaymentRecordStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  REVERSED
+}
+
+enum SimulatedPaymentAttemptStatus {
+  PENDING
+  SIMULATED_SUCCESS
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum SmsOutboxStatus {
+  QUEUED
+  SAVED_TO_OUTBOX
+  FAILED_TO_SAVE
+}
+
 // ==========================================
 // 1. USERS
 // ==========================================
@@ -60,6 +198,8 @@ model User {
   normalizedEmail String      @db.VarChar(254)
   accountType     AccountType
   emailVerifiedAt DateTime?   @db.Timestamptz(6)
+  displayName     String?     @db.VarChar(160)
+  profileImageKey String?     @db.VarChar(500)
   isActive        Boolean     @default(true)
   createdAt       DateTime    @default(now()) @db.Timestamptz(6)
   updatedAt       DateTime    @updatedAt @db.Timestamptz(6)
@@ -72,8 +212,35 @@ model User {
   adminRecoveryCodes     AdminRecoveryCode[]
   adminLoginChallenges   AdminLoginChallenge[]
   loginAttempts          LoginAttempt[]
-  vendorProfile          VendorProfile?
-  reviewedVendorProfiles VendorProfile[] @relation("VendorProfileReviewer")
+  vendorProfile            VendorProfile?
+  reviewedVendorProfiles   VendorProfile[] @relation("VendorProfileReviewer")
+  reviewedProfileChanges   VendorProfileChangeRequest[] @relation("ProfileChangeReviewer")
+  products                 Product[]
+  productImages            ProductImage[]
+  cart                     ShoppingCart?
+  customerOrders           MarketplaceOrder[]
+  vendorOrders             VendorOrder[]
+  vendorNotifications      VendorNotification[]
+  customerNotifications    CustomerNotification[]
+  stockReservations        StockReservation[]
+  productReviews           ProductReview[]
+  couponRedemptions        CouponRedemption[]
+  returnRequests           ReturnRequest[] @relation("ReturnCustomer")
+  vendorReturnReviews      ReturnRequest[] @relation("ReturnVendor")
+  adminReturnReviews       ReturnRequest[] @relation("ReturnAdmin")
+  updatedCommissionSettings CommissionSettings[] @relation("CommissionSettingsUpdater")
+  updatedCategoryCommissions CategoryCommission[] @relation("CategoryCommissionUpdater")
+  categoryCommissionChanges CategoryCommissionHistory[] @relation("CategoryCommissionChangedBy")
+  coupons                  Coupon[]
+  ledgerEntries            LedgerEntry[]
+  payouts                  VendorPayout[]
+  createdPayoutBatches     PayoutBatch[] @relation("PayoutBatchCreator")
+  approvedPayoutBatches    PayoutBatch[] @relation("PayoutBatchApprover")
+  approvedVendorPayouts    VendorPayout[] @relation("VendorPayoutApprover")
+  deliveryRule             VendorDeliveryRule?
+  paymentAttempts          SimulatedPaymentAttempt[]
+  paymentReceipts          PaymentReceipt[]
+  smsOutboxMessages        SmsOutboxMessage[]
 
   @@unique([id, accountType])
   @@unique([accountType, normalizedEmail])
@@ -111,8 +278,10 @@ model UserSession {
   id               String    @id @default(uuid()) @db.Uuid
   userId           String    @db.Uuid
   sessionTokenHash String    @unique @db.VarChar(255)
+  refreshTokenHash String?   @unique @db.VarChar(255)
   lastActivityAt   DateTime  @default(now()) @db.Timestamptz(6)
   expiresAt        DateTime  @db.Timestamptz(6)
+  refreshExpiresAt DateTime? @db.Timestamptz(6)
   revokedAt        DateTime? @db.Timestamptz(6)
   createdAt        DateTime  @default(now()) @db.Timestamptz(6)
 
@@ -250,13 +419,19 @@ model VendorProfile {
   country                String?                   @db.VarChar(100)
   region                 String?                   @db.VarChar(100)
   city                   String?                   @db.VarChar(100)
+  district               String?                   @db.VarChar(100)
   address                String?                   @db.VarChar(300)
   marketAssociation      String?                   @db.VarChar(200)
+  mobileMoneyNumber      String?                   @db.VarChar(32)
+  files                  VendorApplicationFile[]
+  emailDeliveries        VendorApplicationEmail[]
+  changeRequests         VendorProfileChangeRequest[]
   submittedAt            DateTime?                 @db.Timestamptz(6)
   reviewedAt             DateTime?                 @db.Timestamptz(6)
   reviewedById           String?                   @db.Uuid
   rejectionReason        String?                   @db.VarChar(1000)
   informationRequest     String?                   @db.VarChar(1000)
+  deliveryFee            Decimal                   @default(0) @db.Decimal(12, 2)
   createdAt              DateTime                  @default(now()) @db.Timestamptz(6)
   updatedAt              DateTime                  @updatedAt @db.Timestamptz(6)
 
@@ -267,4 +442,769 @@ model VendorProfile {
   @@index([applicationStatus, submittedAt])
   @@index([reviewedById, reviewedAt])
   @@map("vendor_profiles")
+}
+
+model VendorApplicationFile {
+  id              String        @id @default(uuid()) @db.Uuid
+  vendorProfileId String        @db.Uuid
+  fileType        VendorFileType
+  storageKey      String        @unique @db.VarChar(500)
+  originalName    String        @db.VarChar(255)
+  mimeType        String        @db.VarChar(100)
+  sizeBytes       Int
+  createdAt       DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @db.Timestamptz(6)
+
+  vendorProfile VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  @@index([fileType, createdAt])
+  @@unique([vendorProfileId, fileType])
+  @@map("vendor_application_files")
+}
+
+model VendorApplicationEmail {
+  id              String                       @id @default(uuid()) @db.Uuid
+  vendorProfileId String                       @db.Uuid
+  event           VendorApplicationEmailEvent
+  recipientEmail  String                       @db.VarChar(254)
+  attemptCount    Int                          @default(0)
+  sentAt          DateTime?                    @db.Timestamptz(6)
+  lastAttemptAt   DateTime?                    @db.Timestamptz(6)
+  lastError       String?                      @db.VarChar(500)
+  createdAt       DateTime                     @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime                     @updatedAt @db.Timestamptz(6)
+
+  vendorProfile VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([vendorProfileId, event])
+  @@index([sentAt, lastAttemptAt])
+  @@map("vendor_application_emails")
+}
+
+model VendorProfileChangeRequest {
+  id              String                     @id @default(uuid()) @db.Uuid
+  vendorProfileId String                     @db.Uuid
+  status          VendorProfileChangeStatus  @default(DRAFT)
+  proposed        Json
+  currentSnapshot Json
+  vendorNote      String?                    @db.VarChar(1000)
+  adminNote       String?                    @db.VarChar(1000)
+  submittedAt     DateTime?                  @db.Timestamptz(6)
+  reviewedAt      DateTime?                  @db.Timestamptz(6)
+  reviewedById    String?                    @db.Uuid
+  createdAt       DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime                   @updatedAt @db.Timestamptz(6)
+
+  vendorProfile VendorProfile              @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+  reviewedBy    User?                      @relation("ProfileChangeReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  files         VendorProfileChangeFile[]
+
+  @@index([vendorProfileId, status, submittedAt])
+  @@index([status, submittedAt])
+  @@map("vendor_profile_change_requests")
+}
+
+model VendorProfileChangeFile {
+  id              String        @id @default(uuid()) @db.Uuid
+  changeRequestId String        @db.Uuid
+  fileType        VendorFileType
+  storageKey      String        @unique @db.VarChar(500)
+  originalName    String        @db.VarChar(255)
+  mimeType        String        @db.VarChar(100)
+  sizeBytes       Int
+  createdAt       DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @db.Timestamptz(6)
+
+  changeRequest VendorProfileChangeRequest @relation(fields: [changeRequestId], references: [id], onDelete: Cascade)
+
+  @@unique([changeRequestId, fileType])
+  @@map("vendor_profile_change_files")
+}
+
+model Category {
+  id          String    @id @default(uuid()) @db.Uuid
+  name        String    @db.VarChar(120)
+  nameSo      String?   @db.VarChar(120)
+  slug        String    @unique @db.VarChar(140)
+  description String?   @db.VarChar(500)
+  descriptionSo String? @db.VarChar(500)
+  imageKey    String?   @db.VarChar(500)
+  isActive    Boolean   @default(true)
+  parentId    String?   @db.Uuid
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(6)
+
+  products   Product[]
+  parent     Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children   Category[] @relation("CategoryHierarchy")
+  commission CategoryCommission?
+  commissionHistory CategoryCommissionHistory[]
+
+  @@index([isActive, name])
+  @@index([parentId, isActive])
+  @@map("categories")
+}
+
+model Product {
+  id              String        @id @default(uuid()) @db.Uuid
+  vendorId        String        @db.Uuid
+  categoryId      String        @db.Uuid
+  name            String        @db.VarChar(200)
+  nameSo          String?       @db.VarChar(200)
+  slug            String        @db.VarChar(240)
+  description     String?       @db.VarChar(4000)
+  descriptionSo   String?       @db.VarChar(4000)
+  brand           String?       @db.VarChar(120)
+  condition       ProductCondition?
+  status          ProductStatus  @default(DRAFT)
+  marketAssociation String?     @db.VarChar(200)
+  country         String?       @db.VarChar(100)
+  region          String?       @db.VarChar(100)
+  city            String?       @db.VarChar(100)
+  marketName      String?       @db.VarChar(160)
+  publishedAt     DateTime?     @db.Timestamptz(6)
+  archivedAt      DateTime?     @db.Timestamptz(6)
+  createdAt       DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @db.Timestamptz(6)
+
+  vendor   User             @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  category Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  variants ProductVariant[]
+  images   ProductImage[]
+  reviews  ProductReview[]
+
+  @@unique([vendorId, slug])
+  @@index([status, publishedAt])
+  @@index([categoryId, status])
+  @@index([country, region, city, status])
+  @@map("products")
+}
+
+model ProductVariant {
+  id             String   @id @default(uuid()) @db.Uuid
+  productId      String   @db.Uuid
+  sku            String   @unique @db.VarChar(80)
+  variantName    String   @db.VarChar(160)
+  attributes     Json?
+  price          Decimal  @db.Decimal(12, 2)
+  compareAtPrice Decimal? @db.Decimal(12, 2)
+  stockQuantity  Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  product            Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  cartItems          CartItem[]
+  orderLines         OrderLine[]
+  reservationItems   StockReservationItem[]
+
+  @@index([productId, isActive])
+  @@map("product_variants")
+}
+
+model ProductImage {
+  id          String   @id @default(uuid()) @db.Uuid
+  productId   String   @db.Uuid
+  vendorId    String   @db.Uuid
+  storageKey  String   @unique @db.VarChar(500)
+  originalName String  @db.VarChar(255)
+  mimeType    String   @db.VarChar(100)
+  sizeBytes   Int
+  sortOrder   Int      @default(0)
+  isPrimary   Boolean  @default(false)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  vendor  User    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@index([productId, sortOrder])
+  @@index([vendorId, productId])
+  @@map("product_images")
+}
+
+model ShoppingCart {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String?   @unique @db.Uuid
+  guestKey  String?   @unique @db.VarChar(80)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+
+  user  User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CartItem[]
+
+  @@map("shopping_carts")
+}
+
+model CartItem {
+  id            String   @id @default(uuid()) @db.Uuid
+  cartId        String   @db.Uuid
+  variantId     String   @db.Uuid
+  quantity      Int
+  capturedPrice Decimal  @db.Decimal(12, 2)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  cart    ShoppingCart   @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, variantId])
+  @@map("cart_items")
+}
+
+model MarketplaceOrder {
+  id             String                  @id @default(uuid()) @db.Uuid
+  orderNumber    String                  @unique @db.VarChar(24)
+  customerId     String                  @db.Uuid
+  status         MarketplaceOrderStatus  @default(PENDING_PAYMENT)
+  currency       String                  @default("USD") @db.VarChar(3)
+  subtotalAmount Decimal                 @db.Decimal(12, 2)
+  totalAmount    Decimal                 @db.Decimal(12, 2)
+  contactName    String                  @db.VarChar(160)
+  email          String                  @db.VarChar(254)
+  phone          String                  @db.VarChar(32)
+  country        String                  @db.VarChar(100)
+  region         String                  @db.VarChar(100)
+  city           String                  @db.VarChar(100)
+  district       String?                 @db.VarChar(100)
+  address        String                  @db.VarChar(300)
+  instructions   String?                 @db.VarChar(1000)
+  paymentMode    PaymentMode             @default(SIMULATED)
+  paymentStatus  PaymentRecordStatus     @default(PENDING)
+  simulated          Boolean                 @default(true)
+  platformDiscount   Decimal                 @default(0) @db.Decimal(12, 2)
+  deliveryTotal      Decimal                 @default(0) @db.Decimal(12, 2)
+  createdAt          DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime                @updatedAt @db.Timestamptz(6)
+
+  customer      User               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  vendorOrders  VendorOrder[]
+  payment       PaymentRecord?
+  reservation   StockReservation?
+  redemptions   CouponRedemption[]
+  ledgerEntries LedgerEntry[]
+  returnRequests ReturnRequest[]
+  refunds       SimulatedRefund[]
+  paymentAttempts SimulatedPaymentAttempt[]
+  receipt       PaymentReceipt?
+  smsOutboxMessages SmsOutboxMessage[]
+
+  @@index([customerId, createdAt])
+  @@index([status, createdAt])
+  @@map("marketplace_orders")
+}
+
+model VendorOrder {
+  id              String            @id @default(uuid()) @db.Uuid
+  orderId         String            @db.Uuid
+  vendorId        String            @db.Uuid
+  status          VendorOrderStatus @default(NEW)
+  subtotalAmount  Decimal           @db.Decimal(12, 2)
+  confirmBy       DateTime          @db.Timestamptz(6)
+  confirmedAt     DateTime?         @db.Timestamptz(6)
+  courier         String?           @db.VarChar(160)
+  trackingNumber  String?           @db.VarChar(120)
+  expectedDelivery DateTime?        @db.Timestamptz(6)
+  deliveryNote    String?           @db.VarChar(1000)
+  deliveredAt     DateTime?         @db.Timestamptz(6)
+  deliveredBy     String?           @db.VarChar(40)
+  deliveryFee     Decimal           @default(0) @db.Decimal(12, 2)
+  discountAmount  Decimal           @default(0) @db.Decimal(12, 2)
+  packedAt        DateTime?         @db.Timestamptz(6)
+  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime          @updatedAt @db.Timestamptz(6)
+
+  order          MarketplaceOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendor         User             @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  lines          OrderLine[]
+  ledgerEntries  LedgerEntry[]
+  refunds        SimulatedRefund[]
+  couponRedemptions CouponRedemption[]
+
+  @@index([vendorId, status, createdAt])
+  @@index([status, confirmBy])
+  @@map("vendor_orders")
+}
+
+model OrderLine {
+  id            String   @id @default(uuid()) @db.Uuid
+  vendorOrderId String   @db.Uuid
+  variantId     String   @db.Uuid
+  productName   String   @db.VarChar(200)
+  productNameSo String?  @db.VarChar(200)
+  variantName   String   @db.VarChar(160)
+  sku           String   @db.VarChar(80)
+  unitPrice     Decimal  @db.Decimal(12, 2)
+  quantity      Int
+  imageId       String?  @db.Uuid
+  categoryId    String?  @db.Uuid
+  commissionPercent Decimal? @db.Decimal(5, 2)
+  commissionAmount  Decimal? @db.Decimal(12, 2)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+
+  vendorOrder VendorOrder     @relation(fields: [vendorOrderId], references: [id], onDelete: Cascade)
+  variant     ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  review      ProductReview?
+  returns     ReturnRequest[]
+  ledgerEntries LedgerEntry[]
+
+  @@map("order_lines")
+}
+
+model PaymentRecord {
+  id              String               @id @default(uuid()) @db.Uuid
+  orderId         String               @unique @db.Uuid
+  mode            PaymentMode          @default(SIMULATED)
+  status          PaymentRecordStatus  @default(PENDING)
+  simulated       Boolean              @default(true)
+  simulatedOutcome String?             @db.VarChar(20)
+  method          SimulatedPaymentMethod?
+  phone           String?              @db.VarChar(32)
+  idempotencyKey  String?              @unique @db.VarChar(80)
+  amount          Decimal              @db.Decimal(12, 2)
+  createdAt       DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime             @updatedAt @db.Timestamptz(6)
+
+  order MarketplaceOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("payment_records")
+}
+
+model SimulatedPaymentAttempt {
+  id                    String                          @id @default(uuid()) @db.Uuid
+  customerId            String                          @db.Uuid
+  reservationId         String                          @db.Uuid
+  orderId               String?                         @db.Uuid
+  method                SimulatedPaymentMethod?
+  maskedPhone           String?                         @db.VarChar(32)
+  amount                Decimal                         @db.Decimal(12, 2)
+  currency              String                          @default("USD") @db.VarChar(3)
+  transactionReference  String?                         @unique @db.VarChar(80)
+  status                SimulatedPaymentAttemptStatus   @default(PENDING)
+  failureReason         String?                         @db.VarChar(300)
+  provider              String                          @default("MOCK_MOBILE_MONEY") @db.VarChar(40)
+  simulated             Boolean                         @default(true)
+  idempotencyKey        String                          @unique @db.VarChar(80)
+  createdAt             DateTime                        @default(now()) @db.Timestamptz(6)
+  completedAt           DateTime?                       @db.Timestamptz(6)
+
+  customer       User                  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  reservation    StockReservation      @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  order          MarketplaceOrder?     @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  receipt        PaymentReceipt?
+  smsOutboxMessages SmsOutboxMessage[]
+
+  @@index([customerId, createdAt])
+  @@index([reservationId, createdAt])
+  @@index([orderId])
+  @@map("simulated_payment_attempts")
+}
+
+model PaymentReceipt {
+  id                   String   @id @default(uuid()) @db.Uuid
+  receiptNumber        String   @unique @db.VarChar(32)
+  orderId              String   @unique @db.Uuid
+  paymentAttemptId     String   @unique @db.Uuid
+  customerId           String   @db.Uuid
+  customerName         String   @db.VarChar(160)
+  method               SimulatedPaymentMethod
+  maskedMobile         String   @db.VarChar(32)
+  amount               Decimal  @db.Decimal(12, 2)
+  currency             String   @db.VarChar(3)
+  transactionReference String   @db.VarChar(80)
+  paidAt               DateTime @db.Timestamptz(6)
+  simulated            Boolean  @default(true)
+  createdAt            DateTime @default(now()) @db.Timestamptz(6)
+
+  order          MarketplaceOrder         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentAttempt SimulatedPaymentAttempt  @relation(fields: [paymentAttemptId], references: [id], onDelete: Cascade)
+  customer       User                     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, paidAt])
+  @@map("payment_receipts")
+}
+
+model SmsOutboxMessage {
+  id                String           @id @default(uuid()) @db.Uuid
+  recipient         String           @db.VarChar(32)
+  message           String           @db.VarChar(1000)
+  messageType       String           @db.VarChar(60)
+  relatedUserId     String?          @db.Uuid
+  orderId           String?          @db.Uuid
+  paymentAttemptId  String?          @db.Uuid
+  status            SmsOutboxStatus  @default(SAVED_TO_OUTBOX)
+  deliveryMode      String           @default("SIMULATED_OUTBOX") @db.VarChar(40)
+  error             String?          @db.VarChar(500)
+  idempotencyKey    String           @unique @db.VarChar(120)
+  createdAt         DateTime         @default(now()) @db.Timestamptz(6)
+
+  relatedUser    User?                    @relation(fields: [relatedUserId], references: [id], onDelete: SetNull)
+  order          MarketplaceOrder?        @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  paymentAttempt SimulatedPaymentAttempt? @relation(fields: [paymentAttemptId], references: [id], onDelete: SetNull)
+
+  @@index([recipient, createdAt])
+  @@index([messageType, status, createdAt])
+  @@map("sms_outbox_messages")
+}
+
+model VendorNotification {
+  id        String    @id @default(uuid()) @db.Uuid
+  vendorId  String    @db.Uuid
+  title     String    @db.VarChar(200)
+  titleSo   String    @db.VarChar(200)
+  body      String    @db.VarChar(1000)
+  bodySo    String    @db.VarChar(1000)
+  entityType String?  @db.VarChar(60)
+  entityId  String?   @db.Uuid
+  href       String?  @db.VarChar(300)
+  readAt     DateTime? @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  vendor User @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@index([vendorId, readAt, createdAt])
+  @@map("vendor_notifications")
+}
+
+model AdminNotification {
+  id         String    @id @default(uuid()) @db.Uuid
+  type       String    @db.VarChar(80)
+  title      String    @db.VarChar(200)
+  titleSo    String    @db.VarChar(200)
+  body       String    @db.VarChar(1000)
+  bodySo     String    @db.VarChar(1000)
+  href       String?   @db.VarChar(300)
+  entityType String?   @db.VarChar(60)
+  entityId   String?   @db.Uuid
+  readAt     DateTime? @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([readAt, createdAt])
+  @@map("admin_notifications")
+}
+
+model CustomerNotification {
+  id         String    @id @default(uuid()) @db.Uuid
+  customerId String    @db.Uuid
+  title      String    @db.VarChar(200)
+  titleSo    String    @db.VarChar(200)
+  body       String    @db.VarChar(1000)
+  bodySo     String    @db.VarChar(1000)
+  entityType String?   @db.VarChar(60)
+  entityId   String?   @db.Uuid
+  href       String?   @db.VarChar(300)
+  readAt     DateTime? @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+
+  customer User @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, readAt, createdAt])
+  @@map("customer_notifications")
+}
+
+model VendorDeliveryRule {
+  id        String   @id @default(uuid()) @db.Uuid
+  vendorId  String   @unique @db.Uuid
+  fee       Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  vendor User @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@map("vendor_delivery_rules")
+}
+
+model StockReservation {
+  id          String                  @id @default(uuid()) @db.Uuid
+  customerId  String                  @db.Uuid
+  orderId     String?                 @unique @db.Uuid
+  status      StockReservationStatus  @default(ACTIVE)
+  expiresAt   DateTime                @db.Timestamptz(6)
+  createdAt   DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime                @updatedAt @db.Timestamptz(6)
+
+  customer User                    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  order    MarketplaceOrder?       @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  items    StockReservationItem[]
+  paymentAttempts SimulatedPaymentAttempt[]
+
+  @@index([customerId, status, expiresAt])
+  @@index([status, expiresAt])
+  @@map("stock_reservations")
+}
+
+model StockReservationItem {
+  id            String   @id @default(uuid()) @db.Uuid
+  reservationId String   @db.Uuid
+  variantId     String   @db.Uuid
+  quantity      Int
+  unitPrice     Decimal  @db.Decimal(12, 2)
+
+  reservation StockReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  variant     ProductVariant   @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@index([variantId])
+  @@map("stock_reservation_items")
+}
+
+model ProductReview {
+  id          String    @id @default(uuid()) @db.Uuid
+  productId   String    @db.Uuid
+  customerId  String    @db.Uuid
+  orderLineId String    @unique @db.Uuid
+  rating      Int
+  comment     String?   @db.VarChar(2000)
+  photoKey    String?   @db.VarChar(500)
+  hiddenAt    DateTime? @db.Timestamptz(6)
+  hiddenReason String?  @db.VarChar(500)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(6)
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customer  User      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderLine OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Restrict)
+
+  @@index([productId, hiddenAt])
+  @@map("product_reviews")
+}
+
+model Coupon {
+  id               String      @id @default(uuid()) @db.Uuid
+  code             String      @unique @db.VarChar(40)
+  scope            CouponScope
+  vendorId         String?     @db.Uuid
+  discountType     DiscountType
+  discountValue    Decimal     @db.Decimal(12, 2)
+  minOrderAmount   Decimal     @default(0) @db.Decimal(12, 2)
+  startsAt         DateTime    @db.Timestamptz(6)
+  endsAt           DateTime    @db.Timestamptz(6)
+  totalUsageLimit  Int?
+  perCustomerLimit Int         @default(1)
+  isActive         Boolean     @default(true)
+  createdAt        DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime    @updatedAt @db.Timestamptz(6)
+
+  vendor      User?              @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  redemptions CouponRedemption[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([scope, isActive, endsAt])
+  @@map("coupons")
+}
+
+model CouponRedemption {
+  id         String   @id @default(uuid()) @db.Uuid
+  couponId   String   @db.Uuid
+  customerId String   @db.Uuid
+  orderId    String   @db.Uuid
+  vendorOrderId String? @db.Uuid
+  amount     Decimal  @db.Decimal(12, 2)
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+
+  coupon   Coupon           @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  customer User             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  order    MarketplaceOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendorOrder VendorOrder? @relation(fields: [vendorOrderId], references: [id], onDelete: SetNull)
+
+  @@unique([couponId, orderId])
+  @@index([couponId, customerId])
+  @@map("coupon_redemptions")
+}
+
+model ReturnRequest {
+  id            String              @id @default(uuid()) @db.Uuid
+  orderId       String              @db.Uuid
+  orderLineId   String              @db.Uuid
+  customerId    String              @db.Uuid
+  vendorId      String              @db.Uuid
+  status        ReturnRequestStatus @default(REQUESTED)
+  quantity      Int                 @default(1)
+  reason        String              @db.VarChar(200)
+  explanation   String              @db.VarChar(2000)
+  photoKey      String?             @db.VarChar(500)
+  vendorNote    String?             @db.VarChar(1000)
+  returnInstructions String?        @db.VarChar(1000)
+  adminNote     String?             @db.VarChar(1000)
+  reviewedByVendorAt DateTime?      @db.Timestamptz(6)
+  reviewedByAdminAt  DateTime?      @db.Timestamptz(6)
+  reviewedByAdminId  String?        @db.Uuid
+  escalatedAt   DateTime?           @db.Timestamptz(6)
+  returnShippedAt DateTime?         @db.Timestamptz(6)
+  returnShipmentNote String?        @db.VarChar(1000)
+  receivedAt    DateTime?           @db.Timestamptz(6)
+  refundProcessedAt DateTime?       @db.Timestamptz(6)
+  createdAt     DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime            @updatedAt @db.Timestamptz(6)
+
+  order     MarketplaceOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderLine OrderLine        @relation(fields: [orderLineId], references: [id], onDelete: Restrict)
+  customer  User             @relation("ReturnCustomer", fields: [customerId], references: [id], onDelete: Restrict)
+  vendor    User             @relation("ReturnVendor", fields: [vendorId], references: [id], onDelete: Restrict)
+  admin     User?            @relation("ReturnAdmin", fields: [reviewedByAdminId], references: [id], onDelete: SetNull)
+  refund    SimulatedRefund?
+
+  @@index([orderLineId, status])
+  @@index([vendorId, status, createdAt])
+  @@index([customerId, createdAt])
+  @@map("return_requests")
+}
+
+model SimulatedRefund {
+  id            String   @id @default(uuid()) @db.Uuid
+  orderId       String   @db.Uuid
+  vendorOrderId String?  @db.Uuid
+  returnId      String?  @unique @db.Uuid
+  amount        Decimal  @db.Decimal(12, 2)
+  reason        String   @db.VarChar(80)
+  simulated     Boolean  @default(true)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+
+  order       MarketplaceOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendorOrder VendorOrder?     @relation(fields: [vendorOrderId], references: [id], onDelete: SetNull)
+  returnRequest ReturnRequest? @relation(fields: [returnId], references: [id], onDelete: SetNull)
+
+  @@map("simulated_refunds")
+}
+
+model CategoryCommission {
+  id         String   @id @default(uuid()) @db.Uuid
+  categoryId String   @unique @db.Uuid
+  percent    Decimal  @db.Decimal(5, 2)
+  isActive   Boolean  @default(true)
+  updatedById String? @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  updatedBy User? @relation("CategoryCommissionUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@map("category_commissions")
+}
+
+model CommissionSettings {
+  id            String   @id @default("default") @db.VarChar(40)
+  defaultPercent Decimal @db.Decimal(5, 2)
+  updatedById   String?  @db.Uuid
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  updatedBy User? @relation("CommissionSettingsUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@map("commission_settings")
+}
+
+model CategoryCommissionHistory {
+  id          String   @id @default(uuid()) @db.Uuid
+  categoryId  String?  @db.Uuid
+  categoryName String  @db.VarChar(120)
+  previousPercent Decimal? @db.Decimal(5, 2)
+  percent     Decimal  @db.Decimal(5, 2)
+  isActive    Boolean
+  changedById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  changedBy User @relation("CategoryCommissionChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([categoryId, createdAt])
+  @@map("category_commission_history")
+}
+
+model LedgerEntry {
+  id              String          @id @default(uuid()) @db.Uuid
+  vendorId        String?         @db.Uuid
+  orderId         String?         @db.Uuid
+  vendorOrderId   String?         @db.Uuid
+  orderLineId     String?         @db.Uuid
+  payoutId        String?         @db.Uuid
+  couponId        String?         @db.Uuid
+  relatedEntryId  String?         @db.Uuid
+  type            LedgerEntryType
+  amount          Decimal         @db.Decimal(12, 2)
+  currency        String          @default("USD") @db.VarChar(3)
+  description     String          @db.VarChar(500)
+  idempotencyKey  String          @unique @db.VarChar(120)
+  simulated       Boolean         @default(true)
+  createdAt       DateTime        @default(now()) @db.Timestamptz(6)
+
+  vendor      User?        @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  order       MarketplaceOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  vendorOrder VendorOrder? @relation(fields: [vendorOrderId], references: [id], onDelete: SetNull)
+  orderLine   OrderLine?   @relation(fields: [orderLineId], references: [id], onDelete: SetNull)
+  payout      VendorPayout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+  coupon      Coupon?      @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  relatedEntry LedgerEntry? @relation("LedgerEntryRelated", fields: [relatedEntryId], references: [id], onDelete: SetNull)
+  reversals   LedgerEntry[] @relation("LedgerEntryRelated")
+  payoutAllocations PayoutAllocation[]
+
+  @@index([vendorId, createdAt])
+  @@index([orderId, type])
+  @@index([vendorOrderId, type])
+  @@index([payoutId])
+  @@map("ledger_entries")
+}
+
+model PayoutBatch {
+  id          String       @id @default(uuid()) @db.Uuid
+  weekKey     String       @unique @db.VarChar(20)
+  periodStart DateTime     @db.Timestamptz(6)
+  periodEnd   DateTime     @db.Timestamptz(6)
+  status      PayoutStatus @default(PENDING)
+  createdById String?      @db.Uuid
+  approvedById String?     @db.Uuid
+  approvedAt  DateTime?    @db.Timestamptz(6)
+  processedAt DateTime?    @db.Timestamptz(6)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(6)
+
+  createdBy User? @relation("PayoutBatchCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedBy User? @relation("PayoutBatchApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  payouts VendorPayout[]
+
+  @@index([status, createdAt])
+  @@map("payout_batches")
+}
+
+model VendorPayout {
+  id          String       @id @default(uuid()) @db.Uuid
+  vendorId    String       @db.Uuid
+  batchId     String?      @db.Uuid
+  reference   String?      @unique @db.VarChar(40)
+  periodStart DateTime     @db.Timestamptz(6)
+  periodEnd   DateTime     @db.Timestamptz(6)
+  amount      Decimal      @db.Decimal(12, 2)
+  currency    String       @default("USD") @db.VarChar(3)
+  status      PayoutStatus @default(PENDING)
+  idempotencyKey String?   @unique @db.VarChar(120)
+  simulated   Boolean      @default(true)
+  approvedById String?     @db.Uuid
+  approvedAt  DateTime?    @db.Timestamptz(6)
+  processedAt DateTime?    @db.Timestamptz(6)
+  failureReason String?    @db.VarChar(500)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(6)
+
+  vendor  User          @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  batch   PayoutBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  approvedBy User?      @relation("VendorPayoutApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  entries LedgerEntry[]
+  allocations PayoutAllocation[]
+
+  @@unique([batchId, vendorId, currency])
+  @@index([vendorId, createdAt])
+  @@map("vendor_payouts")
+}
+
+model PayoutAllocation {
+  id            String    @id @default(uuid()) @db.Uuid
+  payoutId      String    @db.Uuid
+  ledgerEntryId String    @db.Uuid
+  releasedAt    DateTime? @db.Timestamptz(6)
+  releaseReason String?   @db.VarChar(500)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+
+  payout      VendorPayout @relation(fields: [payoutId], references: [id], onDelete: Restrict)
+  ledgerEntry LedgerEntry  @relation(fields: [ledgerEntryId], references: [id], onDelete: Restrict)
+
+  @@unique([payoutId, ledgerEntryId])
+  @@index([ledgerEntryId, releasedAt])
+  @@index([payoutId, releasedAt])
+  @@map("payout_allocations")
 }

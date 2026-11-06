@@ -4,6 +4,9 @@ import { getDictionary } from "@/i18n/get-dictionary";
 import { isLocale } from "@/i18n/config";
 import { SiteFooter } from "@/components/layout/site-footer";
 import { SiteHeader } from "@/components/layout/site-header";
+import { redirectAuthenticatedPage } from "@/lib/auth/route-guards";
+
+export const instant = false;
 
 export default async function LocalizedHomePage({
   params,
@@ -16,13 +19,14 @@ export default async function LocalizedHomePage({
 }) {
   const { locale: localeParam } = await params;
   if (!isLocale(localeParam)) notFound();
+  await redirectAuthenticatedPage(localeParam);
 
   const dictionary = await getDictionary(localeParam);
 
   return (
     <div className="site-chrome">
       <SiteHeader />
-      <HomePage dictionary={dictionary} searchParams={searchParams} />
+      <HomePage dictionary={dictionary} locale={localeParam} searchParams={searchParams} />
       <SiteFooter />
     </div>
   );

@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { notFound } from "next/navigation";
 import { Geist } from "next/font/google";
 import { LocaleProvider } from "@/i18n/locale-provider";
+import { LiveRouteRefresh } from "@/components/layout/live-route-refresh";
 import { getDictionary } from "@/i18n/get-dictionary";
 import { isLocale, locales } from "@/i18n/config";
 import "../globals.css";
@@ -11,6 +12,8 @@ const geist = Geist({
   subsets: ["latin"],
   variable: "--font-geist",
 });
+
+export const instant = false;
 
 export function generateStaticParams() {
   return locales.map((locale) => ({ locale }));
@@ -28,6 +31,7 @@ export async function generateMetadata({
   return {
     title: dictionary.metadata.title,
     description: dictionary.metadata.description,
+    icons: { icon: "/images/brand/somsuuq-mark.svg" },
   };
 }
 
@@ -51,6 +55,7 @@ export default async function LocaleLayout({
     >
       <body className="min-h-full">
         <LocaleProvider locale={localeParam} dictionary={dictionary}>
+          <LiveRouteRefresh />
           {children}
         </LocaleProvider>
       </body>

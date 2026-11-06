@@ -58,7 +58,12 @@ export async function register(
     );
   }
 
-  let user: { id: string; email: string; accountType: AccountType };
+  let user: {
+    id: string;
+    email: string;
+    displayName: string | null;
+    accountType: AccountType;
+  };
   try {
     user = await prisma.user.create({
       data: {
@@ -72,7 +77,7 @@ export async function register(
           },
         },
       },
-      select: { id: true, email: true, accountType: true },
+      select: { id: true, email: true, displayName: true, accountType: true },
     });
   } catch (error) {
     if (
@@ -106,6 +111,7 @@ export async function register(
     user: {
       id: user.id,
       email: user.email,
+      displayName: user.displayName ?? null,
       accountType: user.accountType,
       emailVerified: false,
     },
@@ -151,6 +157,7 @@ export async function login(
     user: {
       id: user.id,
       email: user.email,
+      displayName: user.displayName,
       accountType: user.accountType,
       emailVerified: true,
     },
@@ -253,7 +260,11 @@ export async function resetPassword(
   accountType: CustomerOrVendor,
   code: string,
   newPassword: string,
+  confirmPassword = newPassword,
 ): Promise<void> {
+  if (newPassword !== confirmPassword) {
+    throw new AppError("PASSWORD_MISMATCH", 400, "Passwords do not match.");
+  }
   const user = await prisma.user.findUnique({
     where: {
       accountType_normalizedEmail: {
@@ -302,6 +313,7 @@ export async function authenticatedUserData(user: AuthenticatedUser) {
     user: {
       id: user.id,
       email: user.email,
+      displayName: user.displayName,
       accountType: user.accountType,
       emailVerified: user.emailVerifiedAt !== null,
     },

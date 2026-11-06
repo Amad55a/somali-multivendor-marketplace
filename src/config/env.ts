@@ -236,6 +236,23 @@ function decodeMfaEncryptionKey(value: string): Uint8Array {
     : Buffer.from(value, "base64");
 }
 
+export function simulatedPaymentsAllowed(): boolean {
+  if (process.env.NODE_ENV === "production") return false;
+  return process.env.SIMULATED_PAYMENTS_ENABLED !== "false";
+}
+
+export function assertMockPaymentAdapterConfigured() {
+  const adapter = process.env.SIMULATED_PAYMENT_ADAPTER ?? "mock";
+  if (adapter !== "mock") {
+    console.error("[config] Unsupported payment adapter selected", { adapter });
+    throw new AppError(
+      "PAYMENT_ADAPTER_UNAVAILABLE",
+      503,
+      "Only the mock payment adapter is available; no real payment provider is configured.",
+    );
+  }
+}
+
 export function getRecaptchaConfig() {
   const parsed = parseServerConfig(
     recaptchaEnvSchema,
