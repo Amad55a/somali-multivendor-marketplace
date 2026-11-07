@@ -1,6 +1,9 @@
 import { notFound } from "next/navigation";
 import { AuthForm } from "@/features/auth/components/auth-form";
 import { isLocale } from "@/i18n/config";
+import { redirectAuthenticatedPage } from "@/lib/auth/route-guards";
+
+export const instant = false;
 
 export default async function AdminLoginPage({
   params,
@@ -9,5 +12,6 @@ export default async function AdminLoginPage({
 }) {
   const { locale } = await params;
   if (!isLocale(locale)) notFound();
+  await redirectAuthenticatedPage(locale);
   return <AuthForm locale={locale} mode="admin-login" />;
 }

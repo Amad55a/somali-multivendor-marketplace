@@ -1,10 +1,13 @@
 import Image from "next/image";
+import Link from "next/link";
 import { ArrowRight, ShoppingBasket } from "lucide-react";
 import type { Dictionary } from "@/i18n/types";
+import type { Locale } from "@/i18n/config";
 
 export function HeroSection({
   copy,
-}: Readonly<{ copy: Dictionary["hero"] }>) {
+  locale,
+}: Readonly<{ copy: Dictionary["hero"]; locale: Locale }>) {
   return (
     <section className="relative overflow-hidden bg-white">
       <svg
@@ -47,20 +50,20 @@ export function HeroSection({
             {copy.description}
           </p>
           <div className="mt-6 flex flex-wrap gap-3">
-            <a
-              href="#featured-products"
+            <Link
+              href={`/${locale}/marketplace`}
               className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#123b35] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1b5047] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#123b35]"
             >
               {copy.startShopping}
               <ArrowRight aria-hidden="true" className="size-4" />
-            </a>
-            <a
-              href="#market-network"
+            </Link>
+            <Link
+              href={`/${locale}/marketplace`}
               className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[#123b35] px-5 py-2.5 text-sm font-semibold text-[#123b35] transition-colors hover:bg-[#f1f5f3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#123b35]"
             >
               {copy.exploreMarkets}
               <ShoppingBasket aria-hidden="true" className="size-4" />
-            </a>
+            </Link>
           </div>
           <p className="mt-5 flex items-start gap-2 text-xs leading-5 text-slate-600">
             <ShoppingBasket
@@ -72,7 +75,7 @@ export function HeroSection({
         </div>
         <div className="relative aspect-[5/4] min-h-64 overflow-hidden rounded-2xl bg-[#e8f0e9] shadow-[0_14px_30px_rgba(20,35,30,0.16)] sm:min-h-80 md:min-h-[18rem] lg:min-h-[25rem]">
           <Image
-            src="/images/hero/somsuuq-marketplace-hero.png"
+            src="/images/hero/marketplace-still-life.svg"
             alt={copy.imageAlt}
             fill
             fetchPriority="high"

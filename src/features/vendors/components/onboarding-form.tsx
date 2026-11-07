@@ -8,6 +8,13 @@ import type { Locale } from "@/i18n/config";
 import { useTranslation } from "@/i18n/hooks/use-translation";
 import { postJson, requestApi } from "@/lib/api/client";
 import { getRecaptchaToken } from "@/lib/recaptcha/client";
+import {
+  businessTypeOptions,
+  countries,
+  findCountry,
+  findRegion,
+  normalizePhone,
+} from "@/features/vendors/data/location-data";
 
 type ApplicationFields = {
   businessName: string;
@@ -19,22 +26,19 @@ type ApplicationFields = {
   country: string;
   region: string;
   city: string;
+  district: string;
   address: string;
   marketAssociation: string;
+  mobileMoneyNumber: string;
 };
 
 const fieldLabels = {
   businessName: "auth.businessName",
   storeName: "auth.storeName",
-  businessType: "auth.businessType",
   description: "auth.businessDescription",
   contactName: "auth.contactName",
-  phone: "auth.phone",
-  country: "auth.country",
-  region: "auth.region",
-  city: "auth.city",
-  address: "auth.address",
   marketAssociation: "auth.marketAssociation",
+  mobileMoneyNumber: "auth.mobileMoneyNumber",
 } as const;
 
 const applicationSchema = z.object({
@@ -43,7 +47,7 @@ const applicationSchema = z.object({
     "DRAFT",
     "PENDING",
     "UNDER_REVIEW",
-    "NEEDS_INFORMATION",
+    "CHANGES_REQUESTED",
     "APPROVED",
     "REJECTED",
     "SUSPENDED",
@@ -57,8 +61,17 @@ const applicationSchema = z.object({
   country: z.string().nullable(),
   region: z.string().nullable(),
   city: z.string().nullable(),
+  district: z.string().nullable(),
   address: z.string().nullable(),
   marketAssociation: z.string().nullable(),
+  mobileMoneyNumber: z.string().nullable(),
+  files: z.array(z.object({
+    id: z.string(),
+    fileType: z.enum(["STORE_LOGO", "BUSINESS_LICENSE"]),
+    mimeType: z.string(),
+    originalName: z.string(),
+    sizeBytes: z.number(),
+  })),
 });
 const onboardingSchema = z.object({ application: applicationSchema.nullable() });
 const savedApplicationSchema = z.object({ application: applicationSchema });
@@ -75,18 +88,23 @@ const emptyFields: ApplicationFields = {
   country: "",
   region: "",
   city: "",
+  district: "",
   address: "",
   marketAssociation: "",
+  mobileMoneyNumber: "",
 };
 const requiredFields: ReadonlyArray<keyof ApplicationFields> = [
   "businessName",
   "storeName",
   "businessType",
+  "description",
   "contactName",
   "phone",
   "country",
   "region",
   "city",
+  "address",
+  "mobileMoneyNumber",
 ];
 const inputClass =
   "min-h-11 rounded-lg border border-[#d5dfda] bg-white px-3 py-2 text-sm text-[#123b35] outline-none focus:border-[#123b35] focus:ring-2 focus:ring-[#123b35]/15";
@@ -100,6 +118,12 @@ export function OnboardingForm({ locale }: Readonly<{ locale: Locale }>) {
   const [editable, setEditable] = useState(true);
   const [busy, setBusy] = useState(true);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [phoneCountry, setPhoneCountry] = useState("Somalia");
+  const [phoneLocal, setPhoneLocal] = useState("");
+  const [businessTypeOther, setBusinessTypeOther] = useState("");
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [licenseFile, setLicenseFile] = useState<File | null>(null);
+  const [uploadedTypes, setUploadedTypes] = useState<string[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -111,15 +135,29 @@ export function OnboardingForm({ locale }: Readonly<{ locale: Locale }>) {
       .then(({ application }) => {
         if (!active || !application) return;
         const nextFields = { ...emptyFields };
-        for (const key of Object.keys(fieldLabels) as Array<keyof ApplicationFields>) {
+        for (const key of Object.keys(emptyFields) as Array<keyof ApplicationFields>) {
           nextFields[key] = application[key] ?? "";
+        }
+        const country = application.country ?? "";
+        setPhoneCountry(country || "Somalia");
+        const phoneCode = findCountry(country)?.callingCode ?? "";
+        setPhoneLocal(
+          application.phone?.replace(
+            new RegExp(`^${phoneCode.replace("+", "\\+")}`),
+            "",
+          ) ?? "",
+        );
+        if (application.businessType && !businessTypeOptions.includes(application.businessType as typeof businessTypeOptions[number])) {
+          nextFields.businessType = "Other";
+          setBusinessTypeOther(application.businessType);
         }
         setFields(nextFields);
         setApplicationId(application.id);
+        setUploadedTypes(application.files.map((file) => file.fileType));
         setApplicationStatus(application.applicationStatus);
         setEditable(
           application.applicationStatus === "DRAFT" ||
-            application.applicationStatus === "NEEDS_INFORMATION",
+            application.applicationStatus === "CHANGES_REQUESTED",
         );
       })
       .catch((error: unknown) => {
@@ -146,12 +184,35 @@ export function OnboardingForm({ locale }: Readonly<{ locale: Locale }>) {
         savedApplicationSchema,
         t("auth.requestFailed"),
         {
-          ...postJson(fields),
+          ...postJson({
+            ...fields,
+            businessType: fields.businessType === "Other" ? businessTypeOther : fields.businessType,
+            phone: phoneLocal.trim() ? normalizePhone(phoneCountry, phoneLocal) : "",
+          }),
           method: applicationId ? "PATCH" : "POST",
         },
       );
       setApplicationId(saved.application.id);
       setApplicationStatus(saved.application.applicationStatus);
+      for (const [file, fileType] of [
+        [logoFile, "STORE_LOGO"],
+        [licenseFile, "BUSINESS_LICENSE"],
+      ] as const) {
+        if (!file) continue;
+        const formData = new FormData();
+        formData.set("file", file);
+        formData.set("fileType", fileType);
+        const response = await fetch("/api/v1/vendor/onboarding/files", {
+          method: "POST",
+          body: formData,
+          credentials: "include",
+        });
+        const payload = (await response.json()) as { data?: { file: { fileType: string } }; error?: { message?: string } };
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.error?.message ?? t("auth.requestFailed"));
+        }
+        setUploadedTypes((current) => [...new Set([...current, payload.data!.file.fileType])]);
+      }
 
       if (submitForReview) {
         const recaptchaToken = await getRecaptchaToken(
@@ -182,7 +243,11 @@ export function OnboardingForm({ locale }: Readonly<{ locale: Locale }>) {
   }
 
   function submitForReview() {
-    const missing = requiredFields.some((key) => fields[key].trim() === "");
+    const missing = requiredFields.some((key) => fields[key].trim() === "") ||
+      !phoneLocal.trim() ||
+      (fields.businessType === "Other" && !businessTypeOther.trim()) ||
+      (!logoFile && !uploadedTypes.includes("STORE_LOGO")) ||
+      (!licenseFile && !uploadedTypes.includes("BUSINESS_LICENSE"));
     if (missing) {
       setFeedback(t("auth.requestFailed"));
       return;
@@ -226,7 +291,7 @@ export function OnboardingForm({ locale }: Readonly<{ locale: Locale }>) {
               htmlFor={`application-${field}`}
               className={`grid gap-1.5 text-sm font-medium text-[#123b35] ${isDescription ? "sm:col-span-2" : ""}`}
             >
-              {t(labelKey)}
+              {t(labelKey)}{required ? " *" : ""}
               {isDescription ? (
                 <textarea
                   id={`application-${field}`}
@@ -255,6 +320,151 @@ export function OnboardingForm({ locale }: Readonly<{ locale: Locale }>) {
             </label>
           );
         })}
+        <FileField
+          id="application-storeLogo"
+          label={t("auth.storeLogo")}
+          accept="image/jpeg,image/png,image/webp"
+          file={logoFile}
+          uploaded={uploadedTypes.includes("STORE_LOGO")}
+          disabled={!editable || busy}
+          onChange={setLogoFile}
+        />
+        <FileField
+          id="application-businessLicense"
+          label={t("auth.businessLicense")}
+          accept="application/pdf,image/jpeg,image/png,image/webp"
+          file={licenseFile}
+          uploaded={uploadedTypes.includes("BUSINESS_LICENSE")}
+          disabled={!editable || busy}
+          onChange={setLicenseFile}
+        />
+        <SearchableSelect
+          id="application-businessType"
+          label={t("auth.businessType")}
+          value={fields.businessType}
+          options={businessTypeOptions.map((value) => ({ label: value, value }))}
+          disabled={!editable || busy}
+          onChange={(value) => setFields((current) => ({ ...current, businessType: value }))}
+        />
+        {fields.businessType === "Other" && (
+          <TextField
+            id="application-businessTypeOther"
+            label={t("auth.businessTypeOther")}
+            value={businessTypeOther}
+            disabled={!editable || busy}
+            onChange={(value) => setBusinessTypeOther(value)}
+          />
+        )}
+        <div className="grid gap-1.5 text-sm font-medium text-[#123b35]">
+          <span>{t("auth.phone")}</span>
+          <div className="grid gap-2 sm:grid-cols-[minmax(8rem,0.7fr)_minmax(0,1.3fr)]">
+            <label htmlFor="application-phoneCountry" className="sr-only">
+              {t("auth.phoneCountry")}
+            </label>
+            <select
+              id="application-phoneCountry"
+              value={phoneCountry}
+              disabled={!editable || busy}
+              onChange={(event) => {
+                setPhoneCountry(event.target.value);
+                setPhoneLocal("");
+                setFields((current) => ({ ...current, phone: "" }));
+              }}
+              className={inputClass}
+              aria-label={t("auth.phoneCountry")}
+            >
+              {countries.map((country) => (
+                <option key={country.code} value={country.name}>
+                  {country.flag} {country.callingCode}
+                </option>
+              ))}
+            </select>
+            <input
+              id="application-phone"
+              type="tel"
+              value={phoneLocal}
+              required
+              disabled={!editable || busy}
+              onChange={(event) => {
+                setPhoneLocal(event.target.value);
+                setFields((current) => ({
+                  ...current,
+                  phone: normalizePhone(phoneCountry, event.target.value),
+                }));
+              }}
+              placeholder={findCountry(phoneCountry)?.callingCode}
+              className={inputClass}
+            />
+          </div>
+        </div>
+        <TextField
+          id="application-mobileMoneyNumber"
+          label={`${t("auth.mobileMoneyNumber")} *`}
+          value={fields.mobileMoneyNumber}
+          disabled={!editable || busy}
+          onChange={(value) =>
+            setFields((current) => ({
+              ...current,
+              mobileMoneyNumber: value.trim()
+                ? normalizePhone(phoneCountry, value)
+                : "",
+            }))
+          }
+        />
+        <SearchableSelect
+          id="application-country"
+          label={t("auth.country")}
+          value={fields.country}
+          options={countries.map((country) => ({ label: `${country.flag} ${country.name}`, value: country.name }))}
+          disabled={!editable || busy}
+          required
+          onChange={(value) =>
+            setFields((current) => ({
+              ...current,
+              country: value,
+              region: "",
+              city: "",
+              district: "",
+              address: "",
+            }))
+          }
+        />
+        <LocationSelect
+          id="application-region"
+          label={t("auth.region")}
+          value={fields.region}
+          options={findCountry(fields.country)?.regions.map((region) => region.name) ?? []}
+          otherLabel={t("auth.otherLocation")}
+          disabled={!editable || busy || !fields.country}
+          required
+          onChange={(value) => setFields((current) => ({ ...current, region: value, city: "", district: "", address: "" }))}
+        />
+        <LocationSelect
+          id="application-city"
+          label={t("auth.city")}
+          value={fields.city}
+          options={Object.keys(findRegion(fields.country, fields.region)?.cities ?? {})}
+          otherLabel={t("auth.otherLocation")}
+          disabled={!editable || busy || !fields.region}
+          required
+          onChange={(value) => setFields((current) => ({ ...current, city: value, district: "", address: "" }))}
+        />
+        <LocationSelect
+          id="application-district"
+          label={t("auth.district")}
+          value={fields.district}
+          options={findRegion(fields.country, fields.region)?.districts?.[fields.city] ?? []}
+          otherLabel={t("auth.otherLocation")}
+          disabled={!editable || busy || !fields.city}
+          onChange={(value) => setFields((current) => ({ ...current, district: value }))}
+        />
+        <TextField
+          id="application-address"
+          label={`${t("auth.address")} *`}
+          value={fields.address}
+          disabled={!editable || busy}
+          onChange={(value) => setFields((current) => ({ ...current, address: value }))}
+        />
         {feedback && (
           <p role="status" aria-live="polite" className="sm:col-span-2 text-sm text-[#123b35]">
             {feedback}
@@ -285,6 +495,139 @@ export function OnboardingForm({ locale }: Readonly<{ locale: Locale }>) {
   );
 }
 
+function TextField({
+  id,
+  label,
+  value,
+  disabled,
+  onChange,
+}: Readonly<{
+  id: string;
+  label: string;
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}>) {
+  return (
+    <label htmlFor={id} className="grid gap-1.5 text-sm font-medium text-[#123b35]">
+      {label}
+      <input id={id} type="text" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} className={inputClass} />
+    </label>
+  );
+}
+
+function FileField({
+  id,
+  label,
+  accept,
+  file,
+  uploaded,
+  disabled,
+  onChange,
+}: Readonly<{
+  id: string;
+  label: string;
+  accept: string;
+  file: File | null;
+  uploaded: boolean;
+  disabled: boolean;
+  onChange: (file: File | null) => void;
+}>) {
+  return (
+    <label htmlFor={id} className="grid gap-1.5 text-sm font-medium text-[#123b35]">
+      {label} *
+      <input
+        id={id}
+        type="file"
+        accept={accept}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.files?.[0] ?? null)}
+        className={inputClass}
+      />
+      <span className="text-xs font-normal text-slate-500">
+        {file?.name ?? (uploaded ? "Uploaded" : "Required")}
+      </span>
+    </label>
+  );
+}
+
+function SearchableSelect({
+  id,
+  label,
+  value,
+  options,
+  disabled,
+  required = false,
+  onChange,
+}: Readonly<{
+  id: string;
+  label: string;
+  value: string;
+  options: Array<{ label: string; value: string }>;
+  disabled: boolean;
+  required?: boolean;
+  onChange: (value: string) => void;
+}>) {
+  const [query, setQuery] = useState("");
+  const visible = options.filter((option) =>
+    option.label.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
+  );
+  return (
+    <label htmlFor={id} className="grid gap-1.5 text-sm font-medium text-[#123b35]">
+      {label}
+      <input
+        id={id}
+        list={`${id}-options`}
+        value={value}
+        required={required}
+        disabled={disabled}
+        onChange={(event) => {
+          setQuery(event.target.value);
+          onChange(event.target.value);
+        }}
+        onFocus={() => setQuery("")}
+        className={inputClass}
+        placeholder={label}
+      />
+      <datalist id={`${id}-options`}>
+        {visible.map((option) => <option key={option.value} value={option.value} />)}
+      </datalist>
+    </label>
+  );
+}
+
+function LocationSelect({
+  options,
+  otherLabel,
+  ...props
+}: Readonly<{
+  id: string;
+  label: string;
+  value: string;
+  options: string[];
+  otherLabel: string;
+  disabled: boolean;
+  required?: boolean;
+  onChange: (value: string) => void;
+}>) {
+  const hasOther = props.value === "Other" || (props.value !== "" && !options.includes(props.value));
+  return (
+    <div className="grid gap-2">
+      <SearchableSelect {...props} options={[...options.map((value) => ({ label: value, value })), { label: otherLabel, value: "Other" }]} />
+      {hasOther && (
+        <input
+          type="text"
+          value={props.value === "Other" ? "" : props.value}
+          disabled={props.disabled}
+          placeholder={otherLabel}
+          onChange={(event) => props.onChange(event.target.value)}
+          className={inputClass}
+        />
+      )}
+    </div>
+  );
+}
+
 function statusLabel(
   status: string,
   t: ReturnType<typeof useTranslation>["t"],
@@ -294,7 +637,7 @@ function statusLabel(
     DRAFT: "auth.status.draft",
     PENDING: "auth.status.pending",
     UNDER_REVIEW: "auth.status.underReview",
-    NEEDS_INFORMATION: "auth.status.needsInformation",
+    CHANGES_REQUESTED: "auth.status.changesRequested",
     APPROVED: "auth.status.approved",
     REJECTED: "auth.status.rejected",
     SUSPENDED: "auth.status.suspended",
@@ -303,7 +646,7 @@ function statusLabel(
     | "auth.status.draft"
     | "auth.status.pending"
     | "auth.status.underReview"
-    | "auth.status.needsInformation"
+    | "auth.status.changesRequested"
     | "auth.status.approved"
     | "auth.status.rejected"
     | "auth.status.suspended"

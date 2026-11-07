@@ -138,19 +138,31 @@ export async function completeAmazonLogin(request: Request): Promise<Response> {
     id: string;
     accountType: "CUSTOMER" | "VENDOR";
   }) => {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerifiedAt: new Date() },
+    });
+    if (user.accountType === "VENDOR") {
+      await prisma.vendorProfile.updateMany({
+        where: { userId: user.id },
+        data: { verificationStatus: "VERIFIED" },
+      });
+    }
     const vendorApplication =
       user.accountType === "VENDOR"
         ? await prisma.vendorProfile.findUnique({
             where: { userId: user.id },
-            select: { id: true },
+            select: { applicationStatus: true },
           })
         : null;
     const destination =
       user.accountType === "CUSTOMER"
-        ? `/${parsedState.locale}/customer/account`
-        : vendorApplication
-          ? `/${parsedState.locale}/vendor/status`
-          : `/${parsedState.locale}/vendor/onboarding`;
+        ? `/${parsedState.locale}/customer/dashboard`
+        : vendorApplication?.applicationStatus === "APPROVED"
+          ? `/${parsedState.locale}/vendor/dashboard`
+          : vendorApplication
+            ? `/${parsedState.locale}/vendor/status`
+            : `/${parsedState.locale}/vendor/onboarding`;
     const session = await createSession(user);
     return setSessionCookie(
       clearCookie(
@@ -199,6 +211,8 @@ export async function completeAmazonLogin(request: Request): Promise<Response> {
         email: profile.email,
         normalizedEmail: profile.email,
         accountType,
+        emailVerifiedAt: new Date(),
+        displayName: profile.name?.trim() || null,
         authAccounts: {
           create: {
             provider: "AMAZON",

@@ -95,7 +95,7 @@ export function ApplicationStatus({ locale }: Readonly<{ locale: Locale }>) {
           )}
 
           {(status.status === "DRAFT" ||
-            status.status === "NEEDS_INFORMATION" ||
+            status.status === "CHANGES_REQUESTED" ||
             status.status === "NOT_STARTED") && (
             <Link
               href={`/${locale}/vendor/onboarding`}
@@ -124,7 +124,7 @@ function statusLabel(
     DRAFT: "auth.status.draft",
     PENDING: "auth.status.pending",
     UNDER_REVIEW: "auth.status.underReview",
-    NEEDS_INFORMATION: "auth.status.needsInformation",
+    CHANGES_REQUESTED: "auth.status.changesRequested",
     APPROVED: "auth.status.approved",
     REJECTED: "auth.status.rejected",
     SUSPENDED: "auth.status.suspended",

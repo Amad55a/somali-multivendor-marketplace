@@ -112,6 +112,78 @@ export function createOneTimeCodeEmail(
   };
 }
 
+export type VendorEmailEvent =
+  | "SUBMITTED"
+  | "APPROVED"
+  | "REJECTED"
+  | "CHANGES_REQUESTED"
+  | "PROFILE_CHANGE_SUBMITTED"
+  | "PROFILE_CHANGE_APPROVED"
+  | "PROFILE_CHANGE_REJECTED";
+
+export function createVendorApplicationEmail(
+  event: VendorEmailEvent,
+  displayName: string,
+  detail?: string,
+  applicationUrl = "",
+): OneTimeCodeEmail {
+  const content = {
+    SUBMITTED: {
+      subject: "Somsuuq — Your Vendor Application Has Been Received",
+      heading: "Your application is pending review",
+      body: "Thank you for applying to become a vendor on Somsuuq. We have received your business information and submitted documents.",
+    },
+    APPROVED: {
+      subject: "Congratulations! Your Somsuuq Vendor Application Has Been Approved",
+      heading: "Your vendor application was approved",
+      body: "Good news! Welcome to Somsuuq. You can now access your vendor dashboard and begin setting up your store.",
+    },
+    REJECTED: {
+      subject: "Update on Your Somsuuq Vendor Application",
+      heading: "Your application was not approved",
+      body: "Your vendor application was not approved at this time. Please review the administrator's reason below.",
+    },
+    CHANGES_REQUESTED: {
+      subject: "Action Required — Additional Information Needed for Your Somsuuq Application",
+      heading: "Additional information is needed",
+      body: "Please update your vendor application with the information or documents requested by the administrator.",
+    },
+    PROFILE_CHANGE_SUBMITTED: {
+      subject: "Somsuuq — We Received Your Store Profile Change Request",
+      heading: "We will review your changes",
+      body: "Thank you for submitting a store profile update. We will review your requested changes, including name, logo, or business details, and email you when a decision is made. You can keep using your vendor dashboard while we review.",
+    },
+    PROFILE_CHANGE_APPROVED: {
+      subject: "Congratulations! Your Somsuuq Store Profile Changes Were Applied",
+      heading: "Your store profile was updated",
+      body: "Good news! An administrator approved your profile change request. Your store name, logo, or other business details have been updated on Somsuuq.",
+    },
+    PROFILE_CHANGE_REJECTED: {
+      subject: "Update on Your Somsuuq Store Profile Change Request",
+      heading: "Your profile changes were not applied",
+      body: "Your requested store profile changes were not approved. Your current store information remains unchanged. Please review the administrator's reason below.",
+    },
+  }[event];
+  const safeName = escapeHtml(displayName);
+  const safeBody = escapeHtml(content.body);
+  const safeDetail = detail ? escapeHtml(detail) : "";
+  const safeUrl = escapeHtml(applicationUrl);
+  return {
+    subject: content.subject,
+    text: [
+      `Hello ${displayName},`,
+      "",
+      content.body,
+      ...(detail ? ["", event === "REJECTED" ? `Reason: ${detail}` : `Administrator message: ${detail}`] : []),
+      ...(applicationUrl ? ["", `View your application: ${applicationUrl}`] : []),
+      "",
+      "Thank you for choosing Somsuuq.",
+      "Somsuuq Team",
+    ].join("\n"),
+    html: `<!doctype html><html lang="en"><body style="margin:0;padding:24px;background:#f1f5f2;font-family:Arial,sans-serif;color:#42514c"><table role="presentation" width="100%"><tr><td align="center"><table role="presentation" width="100%" style="max-width:560px;background:#fff;border:1px solid #dfe8e2;border-radius:16px"><tr><td style="padding:28px">${emailLogo()}<h1 style="color:${brand.forest}">${escapeHtml(content.heading)}</h1><p>Hello ${safeName},</p><p>${safeBody}</p>${detail ? `<p style="padding:14px;background:#fff8e6;border-left:4px solid ${brand.gold}"><strong>${event === "REJECTED" ? "Reason" : "Administrator message"}:</strong> ${safeDetail}</p>` : ""}${applicationUrl ? `<p><a href="${safeUrl}" style="color:${brand.forest};font-weight:bold">View your application</a></p>` : ""}<p>Thank you for choosing Somsuuq.<br><strong style="color:${brand.forest}">Somsuuq Team</strong></p></td></tr></table></td></tr></table></body></html>`,
+  };
+}
+
 function getEmailContent(
   purpose: OneTimeCodePurpose,
   accountType?: CustomerOrVendor,

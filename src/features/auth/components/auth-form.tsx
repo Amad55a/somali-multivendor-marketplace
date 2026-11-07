@@ -46,6 +46,10 @@ const verificationSchema = z.object({
     accountType: z.enum(["CUSTOMER", "VENDOR"]),
   }),
 });
+const accountSchema = z.object({
+  user: z.object({ accountType: z.enum(["CUSTOMER", "VENDOR", "ADMIN"]) }),
+  vendorStatus: z.string().optional(),
+});
 const resetSchema = z.object({ reset: z.literal(true) });
 
 export function AuthForm({
@@ -121,11 +125,20 @@ export function AuthForm({
           t("auth.requestFailed"),
           postJson({ email, password, accountType, recaptchaToken }),
         );
-        router.push(
-          accountType === "VENDOR"
-            ? `/${locale}/vendor/onboarding`
-            : `/${locale}/customer/account`,
-        );
+        if (accountType === "VENDOR") {
+          const account = await requestApi(
+            "/api/v1/auth/me",
+            accountSchema,
+            t("auth.requestFailed"),
+          );
+          router.push(
+            account.vendorStatus === "APPROVED"
+              ? `/${locale}/vendor/dashboard`
+              : `/${locale}/vendor/status`,
+          );
+        } else {
+          router.push(`/${locale}/customer/dashboard`);
+        }
         router.refresh();
         return;
       }
@@ -160,7 +173,7 @@ export function AuthForm({
         router.replace(
           result.user.accountType === "VENDOR"
             ? `/${locale}/vendor/onboarding`
-            : `/${locale}/customer/account`,
+            : `/${locale}/customer/dashboard`,
         );
         router.refresh();
         return;
@@ -175,6 +188,12 @@ export function AuthForm({
           postJson({ email, accountType, recaptchaToken }),
         );
         setFeedback(t("auth.resetRequested"));
+        router.push(
+          `/${locale}/reset-password?${new URLSearchParams({
+            email,
+            accountType,
+          })}`,
+        );
         return;
       }
 
@@ -183,7 +202,13 @@ export function AuthForm({
           "/api/v1/auth/password/reset",
           resetSchema,
           t("auth.requestFailed"),
-          postJson({ email, accountType, code, newPassword }),
+          postJson({
+            email,
+            accountType,
+            code,
+            newPassword,
+            confirmPassword,
+          }),
         );
         setFeedback(t("auth.passwordReset"));
         return;
@@ -259,12 +284,12 @@ export function AuthForm({
         t("auth.requestFailed"),
         postJson({ challengeId, code }),
       );
-      router.replace(`/${locale}/admin/vendors/applications`);
+      router.replace(`/${locale}/admin/overview`);
       router.refresh();
       return;
     }
 
-    router.replace(`/${locale}/admin/vendors/applications`);
+    router.replace(`/${locale}/admin/overview`);
   }
 
   async function resendCode() {
@@ -361,7 +386,7 @@ export function AuthForm({
         </ul>
         <button
           type="button"
-          onClick={() => router.replace(`/${locale}/admin/vendors/applications`)}
+          onClick={() => router.replace(`/${locale}/admin/overview`)}
           className="mt-6 w-full rounded-lg bg-[#123b35] px-4 py-3 text-sm font-semibold text-white hover:bg-[#1d5149]"
         >
           {t("auth.continueToAdmin")}
@@ -518,30 +543,45 @@ export function AuthForm({
         )}
 
         {mode === "reset-password" && (
-          <Field label={t("auth.newPassword")} htmlFor="auth-new-password">
-            <div className="relative">
+          <>
+            <Field label={t("auth.newPassword")} htmlFor="auth-new-password">
+              <div className="relative">
+                <input
+                  id="auth-new-password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="new-password"
+                  minLength={12}
+                  maxLength={128}
+                  required
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  className={`${inputClass} w-full pe-20`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((visible) => !visible)}
+                  aria-label={showPassword ? t("auth.hidePassword") : t("auth.showPassword")}
+                  aria-pressed={showPassword}
+                  className="absolute inset-y-0 end-3 my-auto text-xs font-semibold text-[#123b35] underline"
+                >
+                  {showPassword ? t("auth.hidePassword") : t("auth.showPassword")}
+                </button>
+              </div>
+            </Field>
+            <Field label={t("auth.confirmPassword")} htmlFor="auth-reset-confirm-password">
               <input
-                id="auth-new-password"
+                id="auth-reset-confirm-password"
                 type={showPassword ? "text" : "password"}
                 autoComplete="new-password"
                 minLength={12}
                 maxLength={128}
                 required
-                value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
-                className={`${inputClass} w-full pe-20`}
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                className={inputClass}
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword((visible) => !visible)}
-                aria-label={showPassword ? t("auth.hidePassword") : t("auth.showPassword")}
-                aria-pressed={showPassword}
-                className="absolute inset-y-0 end-3 my-auto text-xs font-semibold text-[#123b35] underline"
-              >
-                {showPassword ? t("auth.hidePassword") : t("auth.showPassword")}
-              </button>
-            </div>
-          </Field>
+            </Field>
+          </>
         )}
 
         {(mode === "verify-email" ||
