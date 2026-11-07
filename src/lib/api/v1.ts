@@ -1688,7 +1688,7 @@ const routes: ApiRoute[] = [
       const user = await requireRole(request, "VENDOR", true);
       await limit(request, "vendor-profile-change-submit", user.id, 5, 3600);
       await verifyRecaptchaToken(input.recaptchaToken, "vendor_profile_change_submit");
-      const { recaptchaToken: _token, ...fields } = input;
+      const fields = profileChangeFieldsSchema.parse(input);
       return jsonResponse(await submitProfileChange(user, fields));
     },
     { authenticated: true, requestBodySchema: submitProfileChangeSchema },

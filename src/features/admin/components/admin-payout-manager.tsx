@@ -18,6 +18,25 @@ const previewSchema = z.object({
     amount: z.string(),
     orderCount: z.number(),
     entryCount: z.number(),
+    orders: z.array(z.object({
+      vendorOrderId: z.string(),
+      orderNumber: z.string(),
+      currency: z.string(),
+      grossSales: z.string(),
+      commission: z.string(),
+      vendorNetEarnings: z.string(),
+      products: z.array(z.object({
+        name: z.string(),
+        quantity: z.number(),
+        grossSales: z.string(),
+        commissionRate: z.string().nullable(),
+        commission: z.string().nullable(),
+      })),
+      deliveryStatus: z.string(),
+      deliveredAt: z.string().nullable(),
+      eligibilityDate: z.string().nullable(),
+      pendingReason: z.string().nullable(),
+    })),
   })),
   pendingPayouts: z.array(z.object({
     vendorId: z.string(),
@@ -28,6 +47,25 @@ const previewSchema = z.object({
     orderCount: z.number(),
     nextEligibleAt: z.string().nullable(),
     awaitingDelivery: z.boolean(),
+    orders: z.array(z.object({
+      vendorOrderId: z.string(),
+      orderNumber: z.string(),
+      currency: z.string(),
+      grossSales: z.string(),
+      commission: z.string(),
+      vendorNetEarnings: z.string(),
+      products: z.array(z.object({
+        name: z.string(),
+        quantity: z.number(),
+        grossSales: z.string(),
+        commissionRate: z.string().nullable(),
+        commission: z.string().nullable(),
+      })),
+      deliveryStatus: z.string(),
+      deliveredAt: z.string().nullable(),
+      eligibilityDate: z.string().nullable(),
+      pendingReason: z.string().nullable(),
+    })),
   })),
 });
 
@@ -52,6 +90,22 @@ const batchesSchema = z.object({
       currency: z.string(),
       status: z.string(),
       failureReason: z.string().nullable(),
+      orders: z.array(z.object({
+        vendorOrderId: z.string().nullable(),
+        orderNumber: z.string().nullable(),
+        currency: z.string(),
+        grossSales: z.string(),
+        commission: z.string(),
+        vendorNetEarnings: z.string(),
+        deliveryStatus: z.string(),
+        deliveredAt: z.string().nullable(),
+        products: z.array(z.object({
+          name: z.string(),
+          quantity: z.number(),
+          commissionRate: z.string().nullable(),
+          commission: z.string().nullable(),
+        })),
+      })),
       grossSales: z.string(),
       commission: z.string(),
       vendorDiscounts: z.string(),
@@ -63,6 +117,20 @@ const batchesSchema = z.object({
 
 type Preview = z.infer<typeof previewSchema>;
 type Batch = z.infer<typeof batchesSchema>["batches"][number];
+type PayoutOrderDetails = {
+  vendorOrderId: string | null;
+  orderNumber: string | null;
+  currency: string;
+  grossSales: string;
+  commission: string;
+  vendorNetEarnings: string;
+  products: Array<{ name: string; quantity: number; commissionRate: string | null; commission: string | null }>;
+  deliveryStatus: string;
+  deliveredAt: string | null;
+  eligibilityDate?: string | null;
+  pendingReason?: string | null;
+};
+type Translate = ReturnType<typeof useTranslation>["t"];
 const isDevelopmentBuild = process.env.NODE_ENV !== "production";
 
 function formatAmount(value: string, currency: string) {
@@ -72,6 +140,41 @@ function formatAmount(value: string, currency: string) {
 
 function formatTotals(totals: Array<{ currency: string; amount: string }>) {
   return totals.map(({ currency, amount }) => formatAmount(amount, currency)).join(" · ") || formatAmount("0.00", "USD");
+}
+
+function pendingReasonLabel(reason: string | null | undefined, t: Translate) {
+  switch (reason) {
+    case "BLOCKING_RETURN": return t("finance.pendingReason.BLOCKING_RETURN");
+    case "AWAITING_DELIVERY": return t("finance.pendingReason.AWAITING_DELIVERY");
+    case "SEVEN_DAY_HOLD": return t("finance.pendingReason.SEVEN_DAY_HOLD");
+    case "PAYMENT_NOT_SETTLED": return t("finance.pendingReason.PAYMENT_NOT_SETTLED");
+    case "ORDER_RECONCILIATION_REQUIRED": return t("finance.pendingReason.ORDER_RECONCILIATION_REQUIRED");
+    default: return null;
+  }
+}
+
+function PayoutOrdersDetails({ orders, t }: { orders: PayoutOrderDetails[]; t: Translate }) {
+  return (
+    <ul className="mt-2 space-y-3">
+      {orders.map((order) => (
+        <li key={order.vendorOrderId ?? order.orderNumber} className="rounded-lg bg-slate-50 p-3">
+          <p className="font-semibold">{order.orderNumber ?? t("finance.orderNeedsReview")}</p>
+          <p className="mt-1 text-xs text-slate-600">
+            {order.products.map((product) => `${product.name} × ${product.quantity}${product.commissionRate ? ` (${product.commissionRate}%)` : ""}`).join(", ")}
+          </p>
+          <p className="mt-1 text-xs">
+            {t("finance.totalSales")}: {formatAmount(order.grossSales, order.currency)} · {t("finance.totalCommission")}: {formatAmount(order.commission, order.currency)} · {t("finance.vendorNet")}: {formatAmount(order.vendorNetEarnings, order.currency)}
+          </p>
+          <p className="mt-1 text-xs text-slate-600">
+            {order.deliveryStatus}
+            {order.deliveredAt ? ` · ${new Date(order.deliveredAt).toLocaleString()}` : ""}
+            {order.eligibilityDate ? ` · ${t("finance.nextEligibility")}: ${new Date(order.eligibilityDate).toLocaleString()}` : ""}
+            {order.pendingReason ? ` · ${pendingReasonLabel(order.pendingReason, t)}` : ""}
+          </p>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export function AdminPayoutManager() {
@@ -234,7 +337,12 @@ export function AdminPayoutManager() {
                       <tr key={`${payout.vendorId}-${payout.currency}`}>
                         <td className="py-3 pe-4 font-semibold">{payout.storeName ?? payout.vendorName ?? payout.vendorId}</td>
                         <td className="py-3 pe-4 text-slate-600">{payout.email ?? "—"}</td>
-                        <td className="py-3 pe-4 text-slate-600">{payout.orderCount}</td>
+                        <td className="py-3 pe-4 text-slate-600">
+                          <details>
+                            <summary className="cursor-pointer">{payout.orderCount} · {t("finance.reviewOrders")}</summary>
+                            <PayoutOrdersDetails orders={payout.orders} t={t} />
+                          </details>
+                        </td>
                         <td className="py-3 font-semibold">{formatAmount(payout.amount, payout.currency)}</td>
                       </tr>
                     ))}
@@ -258,7 +366,12 @@ export function AdminPayoutManager() {
                     {preview.pendingPayouts.map((payout) => (
                       <tr key={`${payout.vendorId}-${payout.currency}`}>
                         <td className="py-3 pe-4 font-semibold">{payout.storeName ?? payout.vendorName ?? payout.vendorId}</td>
-                        <td className="py-3 pe-4">{payout.orderCount}</td>
+                        <td className="py-3 pe-4">
+                          <details>
+                            <summary className="cursor-pointer">{payout.orderCount} · {t("finance.reviewOrders")}</summary>
+                            <PayoutOrdersDetails orders={payout.orders} t={t} />
+                          </details>
+                        </td>
                         <td className="py-3 pe-4">{formatAmount(payout.amount, payout.currency)}</td>
                         <td className="py-3">
                           {payout.awaitingDelivery ? t("finance.awaitingDelivery") : payout.nextEligibleAt ? new Date(payout.nextEligibleAt).toLocaleString() : "—"}
@@ -298,7 +411,7 @@ function BatchCard({
     <article className="rounded-2xl border border-[#e1e9e5] bg-white p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h4 className="font-bold text-[#123b35]">{batch.weekKey} · {batch.status}</h4>
+          <h4 className="font-bold text-[#123b35]">{batch.weekKey} · {batch.status === "PENDING" ? "BATCH_CREATED" : batch.status === "APPROVED" ? "PROCESSING" : batch.status}</h4>
           <p className="mt-1 text-sm text-slate-600">{new Date(batch.periodStart).toLocaleDateString()} – {new Date(batch.periodEnd).toLocaleDateString()}</p>
           <p className="mt-1 text-sm">{t("finance.totalAmount")}: <strong>{formatTotals(batch.totalAmounts)}</strong> · {t("finance.eligibleVendors")}: {batch.vendorCount}</p>
         </div>
@@ -340,7 +453,13 @@ function BatchCard({
             <tbody className="divide-y divide-[#edf1ef]">
               {batch.payouts.map((payout) => (
                 <tr key={payout.id}>
-                  <td className="py-2 pe-4 font-medium">{payout.vendorName}</td>
+                  <td className="py-2 pe-4 font-medium">
+                    {payout.vendorName}
+                    <details className="mt-1 font-normal">
+                      <summary className="cursor-pointer text-xs text-slate-600">{t("finance.reviewOrders")} ({payout.orders.length})</summary>
+                      <PayoutOrdersDetails orders={payout.orders} t={t} />
+                    </details>
+                  </td>
                   <td className="py-2 pe-4">{formatAmount(payout.grossSales, payout.currency)}</td>
                   <td className="py-2 pe-4">{formatAmount(payout.commission, payout.currency)}</td>
                   <td className="py-2 pe-4">{formatAmount(payout.vendorDiscounts, payout.currency)}</td>
@@ -349,7 +468,7 @@ function BatchCard({
                   <td className="py-2 pe-4 font-semibold">{formatAmount(payout.amount, payout.currency)}</td>
                   <td className="py-2 pe-4 text-slate-600">{payout.reference ?? "—"}</td>
                   <td className="py-2">
-                    {payout.status}{payout.failureReason ? ` · ${payout.failureReason}` : ""}
+                    {payout.status === "PENDING" ? "BATCH_CREATED" : payout.status === "APPROVED" ? "PROCESSING" : payout.status}{payout.failureReason ? ` · ${payout.failureReason}` : ""}
                     {payout.status === "FAILED" && (
                       <button
                         type="button"

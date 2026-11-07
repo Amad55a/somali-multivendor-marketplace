@@ -2,16 +2,20 @@ import { randomBytes } from "node:crypto";
 import { Prisma } from "../../../generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { AppError } from "@/lib/errors/app-error";
+import { simulatedPayoutAdapter, type PayoutAdapter } from "@/features/commerce/payout-adapter";
 import {
   ADJUSTMENT_LEDGER_TYPES,
   PAYOUT_HOLD_MS,
   SOURCE_LEDGER_TYPES,
+  lineGross,
   payoutHoldCutoff,
   reconcilePaidVendorOrder,
   resolveCommissionPercent,
   resolvePayoutHoldMs,
   sumLedgerAmounts,
   summarizeLedgerEntriesByVendorCurrency,
+  summarizeVendorLedger,
+  vendorOrderPayoutPendingReason,
   vendorOrderPayoutEligible,
   type CommissionCategory,
 } from "@/features/commerce/financial-calculations";
@@ -396,8 +400,17 @@ async function findEligibleOpenEntries(
           id: true,
           deliveredAt: true,
           status: true,
-          order: { select: { paymentStatus: true, status: true } },
-          lines: { select: { returns: { where: { status: { in: [...unresolvedReturnStatuses] } }, select: { id: true }, take: 1 } } },
+          order: { select: { orderNumber: true, paymentStatus: true, status: true } },
+          lines: {
+            select: {
+              productName: true,
+              unitPrice: true,
+              quantity: true,
+              commissionPercent: true,
+              commissionAmount: true,
+              returns: { where: { status: { in: [...unresolvedReturnStatuses] } }, select: { id: true }, take: 1 },
+            },
+          },
         },
       },
     },
@@ -416,7 +429,6 @@ async function findOpenOrderEntries(client: Prisma.TransactionClient | typeof pr
         is: {
           status: { notIn: ["CANCELLED", "EXPIRED"] },
           order: { is: { status: "PAID", paymentStatus: "SUCCEEDED" } },
-          lines: { none: { returns: { some: { status: { in: [...unresolvedReturnStatuses] } } } } },
         },
       },
     },
@@ -426,8 +438,17 @@ async function findOpenOrderEntries(client: Prisma.TransactionClient | typeof pr
           id: true,
           status: true,
           deliveredAt: true,
-          order: { select: { paymentStatus: true, status: true } },
-          lines: { select: { returns: { where: { status: { in: [...unresolvedReturnStatuses] } }, select: { id: true }, take: 1 } } },
+          order: { select: { orderNumber: true, paymentStatus: true, status: true } },
+          lines: {
+            select: {
+              productName: true,
+              unitPrice: true,
+              quantity: true,
+              commissionPercent: true,
+              commissionAmount: true,
+              returns: { where: { status: { in: [...unresolvedReturnStatuses] } }, select: { id: true }, take: 1 },
+            },
+          },
         },
       },
     },
@@ -438,6 +459,59 @@ async function findOpenOrderEntries(client: Prisma.TransactionClient | typeof pr
 function summarizeEligibleEntries(entries: Awaited<ReturnType<typeof findEligibleOpenEntries>>) {
   return summarizeLedgerEntriesByVendorCurrency(entries)
     .filter((item) => item.amount.gt(0));
+}
+
+type PayoutOrderEntry = Awaited<ReturnType<typeof findOpenOrderEntries>>[number];
+
+function summarizePayoutOrders(entries: PayoutOrderEntry[], cutoff: Date, holdMs: number) {
+  const grouped = new Map<string, PayoutOrderEntry[]>();
+  for (const entry of entries) {
+    if (!entry.vendorOrder) continue;
+    const group = grouped.get(entry.vendorOrder.id) ?? [];
+    group.push(entry);
+    grouped.set(entry.vendorOrder.id, group);
+  }
+
+  return [...grouped.values()].map((orderEntries) => {
+    const vendorOrder = orderEntries[0]!.vendorOrder!;
+    const reason = vendorOrderPayoutPendingReason({
+      paymentStatus: vendorOrder.order.paymentStatus,
+      orderStatus: vendorOrder.order.status,
+      vendorStatus: vendorOrder.status,
+      deliveredAt: vendorOrder.deliveredAt,
+      cutoff,
+      hasBlockingReturn: vendorOrder.lines.some((line) => line.returns.length > 0),
+    });
+    const grossSales = vendorOrder.lines.reduce(
+      (total, line) => total.add(lineGross(line.unitPrice, line.quantity)),
+      new Prisma.Decimal(0),
+    );
+    const commission = vendorOrder.lines.reduce(
+      (total, line) => total.add(line.commissionAmount ?? 0),
+      new Prisma.Decimal(0),
+    );
+    return {
+      vendorOrderId: vendorOrder.id,
+      orderNumber: vendorOrder.order.orderNumber,
+      currency: orderEntries[0]!.currency,
+      grossSales: money(grossSales),
+      commission: money(commission),
+      vendorNetEarnings: money(sumLedgerAmounts(orderEntries)),
+      products: vendorOrder.lines.map((line) => ({
+        name: line.productName,
+        quantity: line.quantity,
+        grossSales: money(lineGross(line.unitPrice, line.quantity)),
+        commissionRate: line.commissionPercent?.toString() ?? null,
+        commission: line.commissionAmount === null ? null : money(line.commissionAmount),
+      })),
+      deliveryStatus: vendorOrder.status,
+      deliveredAt: vendorOrder.deliveredAt?.toISOString() ?? null,
+      eligibilityDate: vendorOrder.deliveredAt
+        ? new Date(vendorOrder.deliveredAt.getTime() + holdMs).toISOString()
+        : null,
+      pendingReason: reason,
+    };
+  });
 }
 
 export async function previewPayoutBalances(now = new Date(), holdDays?: number) {
@@ -458,14 +532,43 @@ export async function previewPayoutBalances(now = new Date(), holdDays?: number)
   }));
   const pendingSummaries = summarizeLedgerEntriesByVendorCurrency(pendingEntries)
     .filter((item) => item.amount.gt(0));
+  const ordersByVendorOrderId = new Map(
+    summarizePayoutOrders([...entries, ...pendingEntries], cutoff, holdMs)
+      .map((order) => [order.vendorOrderId, order]),
+  );
+  const eligibleOrdersByVendor = new Map<string, ReturnType<typeof summarizePayoutOrders>>();
+  for (const item of summaries) {
+    eligibleOrdersByVendor.set(
+      `${item.vendorId}:${item.currency}`,
+      item.orderIds.flatMap((id) => {
+        const order = ordersByVendorOrderId.get(id);
+        return order ? [order] : [];
+      }),
+    );
+  }
+  const pendingOrdersByVendor = new Map<string, ReturnType<typeof summarizePayoutOrders>>();
+  for (const order of summarizePayoutOrders(pendingEntries, cutoff, holdMs)) {
+    const vendorId = pendingEntries.find((entry) => entry.vendorOrder?.id === order.vendorOrderId)?.vendorId;
+    if (!vendorId) continue;
+    const key = `${vendorId}:${order.currency}`;
+    pendingOrdersByVendor.set(key, [...(pendingOrdersByVendor.get(key) ?? []), order]);
+  }
   const upcoming = new Map<string, { nextEligibleAt: Date | null; awaitingDelivery: boolean }>();
   for (const entry of pendingEntries) {
     if (!entry.vendorId || !entry.vendorOrder) continue;
     const key = `${entry.vendorId}:${entry.currency}`;
     const state = upcoming.get(key) ?? { nextEligibleAt: null, awaitingDelivery: false };
-    if (!entry.vendorOrder.deliveredAt || entry.vendorOrder.status !== "DELIVERED") {
+    const reason = vendorOrderPayoutPendingReason({
+      paymentStatus: entry.vendorOrder.order.paymentStatus,
+      orderStatus: entry.vendorOrder.order.status,
+      vendorStatus: entry.vendorOrder.status,
+      deliveredAt: entry.vendorOrder.deliveredAt,
+      cutoff,
+      hasBlockingReturn: entry.vendorOrder.lines.some((line) => line.returns.length > 0),
+    });
+    if (reason === "AWAITING_DELIVERY") {
       state.awaitingDelivery = true;
-    } else {
+    } else if (reason === "SEVEN_DAY_HOLD" && entry.vendorOrder.deliveredAt) {
       const eligibleAt = new Date(entry.vendorOrder.deliveredAt.getTime() + holdMs);
       if (!state.nextEligibleAt || eligibleAt < state.nextEligibleAt) state.nextEligibleAt = eligibleAt;
     }
@@ -489,6 +592,7 @@ export async function previewPayoutBalances(now = new Date(), holdDays?: number)
       amount: money(item.amount),
       orderCount: item.orderIds.length,
       entryCount: item.entryIds.length,
+      orders: eligibleOrdersByVendor.get(`${item.vendorId}:${item.currency}`) ?? [],
     })),
     pendingPayouts: pendingSummaries.map((item) => ({
       vendorId: item.vendorId,
@@ -499,6 +603,7 @@ export async function previewPayoutBalances(now = new Date(), holdDays?: number)
       orderCount: item.orderIds.length,
       nextEligibleAt: upcoming.get(`${item.vendorId}:${item.currency}`)?.nextEligibleAt?.toISOString() ?? null,
       awaitingDelivery: upcoming.get(`${item.vendorId}:${item.currency}`)?.awaitingDelivery ?? false,
+      orders: pendingOrdersByVendor.get(`${item.vendorId}:${item.currency}`) ?? [],
     })),
     simulated: true,
   };
@@ -630,7 +735,35 @@ export async function listAdminPayoutBatches() {
         include: {
           vendor: { select: { displayName: true, email: true, vendorProfile: { select: { storeName: true } } } },
           allocations: {
-            include: { ledgerEntry: { select: { type: true, amount: true } } },
+            include: {
+              ledgerEntry: {
+                select: {
+                  id: true,
+                  type: true,
+                  amount: true,
+                  currency: true,
+                  vendorOrderId: true,
+                  order: { select: { orderNumber: true, status: true, paymentStatus: true } },
+                  vendorOrder: {
+                    select: {
+                      id: true,
+                      status: true,
+                      deliveredAt: true,
+                      order: { select: { orderNumber: true } },
+                      lines: {
+                        select: {
+                          productName: true,
+                          unitPrice: true,
+                          quantity: true,
+                          commissionPercent: true,
+                          commissionAmount: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -648,7 +781,16 @@ export async function listAdminPayoutBatches() {
       processedAt: batch.processedAt?.toISOString() ?? null,
       totalAmounts: totalsByCurrency(batch.payouts.filter((payout) => payout.status !== "CANCELLED")),
       vendorCount: new Set(batch.payouts.filter((payout) => payout.status !== "CANCELLED").map((payout) => payout.vendorId)).size,
-      payouts: batch.payouts.map((payout) => ({
+      payouts: batch.payouts.map((payout) => {
+        const orderGroups = new Map<string, typeof payout.allocations>();
+        for (const allocation of payout.allocations) {
+          const entry = allocation.ledgerEntry;
+          const key = entry.vendorOrderId ?? entry.order?.orderNumber ?? entry.id;
+          const group = orderGroups.get(key) ?? [];
+          group.push(allocation);
+          orderGroups.set(key, group);
+        }
+        return {
         id: payout.id,
         vendorId: payout.vendorId,
         vendorName: payout.vendor.vendorProfile?.storeName ?? payout.vendor.displayName ?? payout.vendor.email,
@@ -672,12 +814,43 @@ export async function listAdminPayoutBatches() {
         deliveryFees: money(sumLedgerAmounts(payout.allocations
           .filter((allocation) => allocation.ledgerEntry.type === "DELIVERY_FEE")
           .map((allocation) => allocation.ledgerEntry))),
-      })),
+        orders: [...orderGroups.values()].map((allocations) => {
+          const first = allocations[0]!.ledgerEntry;
+          const order = first.vendorOrder;
+          const products = order?.lines ?? [];
+          return {
+            vendorOrderId: order?.id ?? first.vendorOrderId,
+            orderNumber: order?.order.orderNumber ?? first.order?.orderNumber ?? null,
+            currency: first.currency,
+            grossSales: money(sumLedgerAmounts(allocations
+              .filter((allocation) => allocation.ledgerEntry.type === "SALE")
+              .map((allocation) => allocation.ledgerEntry))),
+            commission: money(sumLedgerAmounts(allocations
+              .filter((allocation) => allocation.ledgerEntry.type === "COMMISSION")
+              .map((allocation) => allocation.ledgerEntry)).abs()),
+            vendorNetEarnings: money(sumLedgerAmounts(allocations.map((allocation) => allocation.ledgerEntry))),
+            deliveryStatus: order?.status ?? "UNKNOWN",
+            deliveredAt: order?.deliveredAt?.toISOString() ?? null,
+            products: products.map((line) => ({
+              name: line.productName,
+              quantity: line.quantity,
+              commissionRate: line.commissionPercent?.toString() ?? null,
+              commission: line.commissionAmount === null ? null : money(line.commissionAmount),
+            })),
+          };
+        }),
+      };
+      }),
     })),
   };
 }
 
-export async function approvePayoutBatch(admin: AuthenticatedUser, batchId: string, holdDays?: number) {
+export async function approvePayoutBatch(
+  admin: AuthenticatedUser,
+  batchId: string,
+  holdDays?: number,
+  adapter: PayoutAdapter = simulatedPayoutAdapter,
+) {
   if (admin.accountType !== "ADMIN") throw new AppError("FORBIDDEN", 403, "Admin access is required.");
   const holdMs = payoutHoldDuration(holdDays);
   return prisma.$transaction(async (tx) => {
@@ -702,6 +875,7 @@ export async function approvePayoutBatch(admin: AuthenticatedUser, batchId: stri
     }
 
     const paidAmounts: Array<{ currency: string; amount: Prisma.Decimal }> = [];
+    let failedCount = 0;
     for (const payout of batch.payouts) {
       const allocations = await tx.payoutAllocation.findMany({
         where: { payoutId: payout.id, releasedAt: null },
@@ -753,6 +927,33 @@ export async function approvePayoutBatch(admin: AuthenticatedUser, batchId: stri
         where: { id: payout.id },
         data: { status: "PROCESSING", approvedById: admin.id, approvedAt: now },
       });
+      const adapterResult = await adapter.processPayout({
+        payoutId: payout.id,
+        vendorId: payout.vendorId,
+        amount: money(payout.amount),
+        currency: payout.currency,
+        idempotencyKey: `PAYOUT:${payout.id}`,
+      });
+      if (!adapterResult.simulated) {
+        throw new AppError("REAL_PAYOUT_DISABLED", 403, "Real payouts are disabled; only simulated payouts are supported.");
+      }
+      if (adapterResult.status === "FAILED") {
+        failedCount += 1;
+        await tx.vendorPayout.update({
+          where: { id: payout.id },
+          data: { status: "FAILED", failureReason: adapterResult.failureReason ?? "SIMULATED_PAYOUT_FAILED" },
+        });
+        await tx.auditLog.create({
+          data: {
+            actorUserId: admin.id,
+            action: "PAYOUT_SIMULATED_FAILED",
+            entityType: "VendorPayout",
+            entityId: payout.id,
+            metadata: { reference: payout.reference, amount: money(payout.amount), currency: payout.currency, simulated: true },
+          },
+        });
+        continue;
+      }
       await tx.ledgerEntry.create({
         data: {
           vendorId: payout.vendorId,
@@ -784,20 +985,33 @@ export async function approvePayoutBatch(admin: AuthenticatedUser, batchId: stri
       paidAmounts.push({ currency: payout.currency, amount: payout.amount });
     }
 
+    const batchStatus = failedCount > 0 ? "FAILED" : "SIMULATED_PAID";
     await tx.payoutBatch.update({
       where: { id: batch.id },
-      data: { status: "SIMULATED_PAID", approvedById: admin.id, approvedAt: now, processedAt: now },
+      data: {
+        status: batchStatus,
+        approvedById: admin.id,
+        approvedAt: now,
+        ...(failedCount === 0 ? { processedAt: now } : {}),
+      },
     });
     await tx.auditLog.create({
       data: {
         actorUserId: admin.id,
-        action: "PAYOUT_BATCH_SIMULATED_APPROVED",
+        action: failedCount > 0 ? "PAYOUT_BATCH_SIMULATED_PARTIAL_FAILURE" : "PAYOUT_BATCH_SIMULATED_APPROVED",
         entityType: "PayoutBatch",
         entityId: batch.id,
-        metadata: { totalAmounts: totalsByCurrency(paidAmounts), vendorCount: batch.payouts.length, simulated: true },
+        metadata: { totalAmounts: totalsByCurrency(paidAmounts), vendorCount: batch.payouts.length, failedCount, simulated: true },
       },
     });
-    return { batchId: batch.id, status: "SIMULATED_PAID", totalAmounts: totalsByCurrency(paidAmounts), vendorCount: batch.payouts.length, simulated: true };
+    return {
+      batchId: batch.id,
+      status: batchStatus,
+      totalAmounts: totalsByCurrency(paidAmounts),
+      vendorCount: batch.payouts.length,
+      failedCount,
+      simulated: true,
+    };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
@@ -805,6 +1019,7 @@ export async function retryFailedVendorPayout(
   admin: AuthenticatedUser,
   payoutId: string,
   holdDays?: number,
+  adapter: PayoutAdapter = simulatedPayoutAdapter,
 ) {
   if (admin.accountType !== "ADMIN") throw new AppError("FORBIDDEN", 403, "Admin access is required.");
   const holdMs = payoutHoldDuration(holdDays);
@@ -889,6 +1104,32 @@ export async function retryFailedVendorPayout(
         failureReason: null,
       },
     });
+    const adapterResult = await adapter.processPayout({
+      payoutId: payout.id,
+      vendorId: payout.vendorId,
+      amount: money(payout.amount),
+      currency: payout.currency,
+      idempotencyKey: `PAYOUT:${payout.id}`,
+    });
+    if (!adapterResult.simulated) {
+      throw new AppError("REAL_PAYOUT_DISABLED", 403, "Real payouts are disabled; only simulated payouts are supported.");
+    }
+    if (adapterResult.status === "FAILED") {
+      await tx.vendorPayout.update({
+        where: { id: payout.id },
+        data: { status: "FAILED", failureReason: adapterResult.failureReason ?? "SIMULATED_PAYOUT_FAILED" },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorUserId: admin.id,
+          action: "VENDOR_PAYOUT_RETRY_SIMULATED_FAILED",
+          entityType: "VendorPayout",
+          entityId: payout.id,
+          metadata: { reference: payout.reference, amount: money(payout.amount), currency: payout.currency, simulated: true },
+        },
+      });
+      return { payoutId: payout.id, status: "FAILED", simulated: true };
+    }
     await tx.ledgerEntry.create({
       data: {
         vendorId: payout.vendorId,
@@ -984,34 +1225,43 @@ export type VendorFinancialFilters = {
 
 export async function getVendorFinancialStatement(vendorId: string, filters: VendorFinancialFilters = {}) {
   const cutoff = new Date(Date.now() - PAYOUT_HOLD_MS);
-  const [allEntries, payouts, pageEntries] = await Promise.all([
+  const [allEntries, pageEntries, vendor] = await Promise.all([
     prisma.ledgerEntry.findMany({
       where: { vendorId },
       select: {
+        id: true,
         type: true,
         amount: true,
         currency: true,
         payoutId: true,
         createdAt: true,
+        order: { select: { orderNumber: true } },
+        orderLine: { select: { productName: true, commissionPercent: true, commissionAmount: true } },
         vendorOrder: {
           select: {
+            id: true,
             status: true,
             deliveredAt: true,
-            order: { select: { status: true, paymentStatus: true } },
-            lines: { select: { returns: { where: { status: { in: [...unresolvedReturnStatuses] } }, select: { id: true }, take: 1 } } },
+            order: { select: { orderNumber: true, status: true, paymentStatus: true } },
+            lines: {
+              select: {
+                productName: true,
+                unitPrice: true,
+                quantity: true,
+                commissionPercent: true,
+                commissionAmount: true,
+                returns: { where: { status: { in: [...unresolvedReturnStatuses] } }, select: { id: true, status: true }, take: 1 },
+              },
+            },
           },
         },
         payoutAllocations: {
           where: { releasedAt: null },
-          select: { payout: { select: { reference: true, status: true } } },
+          select: { payout: { select: { reference: true, status: true, batchId: true, batch: { select: { weekKey: true } } } } },
           take: 1,
         },
-        payout: { select: { reference: true, status: true } },
+        payout: { select: { reference: true, status: true, batchId: true, batch: { select: { weekKey: true } } } },
       },
-    }),
-    prisma.vendorPayout.findMany({
-      where: { vendorId, status: "SIMULATED_PAID" },
-      select: { amount: true, currency: true },
     }),
     prisma.ledgerEntry.findMany({
       where: {
@@ -1032,13 +1282,30 @@ export async function getVendorFinancialStatement(vendorId: string, filters: Ven
       },
       include: {
         order: { select: { orderNumber: true } },
-        vendorOrder: { select: { id: true, deliveredAt: true } },
+        vendorOrder: {
+          select: {
+            id: true,
+            status: true,
+            deliveredAt: true,
+            order: { select: { orderNumber: true, status: true, paymentStatus: true } },
+            lines: {
+              select: {
+                productName: true,
+                unitPrice: true,
+                quantity: true,
+                commissionPercent: true,
+                commissionAmount: true,
+                returns: { where: { status: { in: [...unresolvedReturnStatuses] } }, select: { id: true }, take: 1 },
+              },
+            },
+          },
+        },
         orderLine: { select: { commissionPercent: true, productName: true } },
         coupon: { select: { code: true } },
-        payout: { select: { reference: true, status: true } },
+        payout: { select: { reference: true, status: true, batchId: true, batch: { select: { weekKey: true } } } },
         payoutAllocations: {
           where: { releasedAt: null },
-          select: { payout: { select: { reference: true, status: true } } },
+          select: { payout: { select: { reference: true, status: true, batchId: true, batch: { select: { weekKey: true } } } } },
           take: 1,
         },
       },
@@ -1046,97 +1313,181 @@ export async function getVendorFinancialStatement(vendorId: string, filters: Ven
       take: Math.min(Math.max(filters.limit ?? 50, 1), 100),
       ...(filters.cursor ? { skip: 1, cursor: { id: filters.cursor } } : {}),
     }),
+    prisma.user.findUniqueOrThrow({
+      where: { id: vendorId },
+      select: { displayName: true, vendorProfile: { select: { storeName: true } } },
+    }),
   ]);
-  const allByCurrency = (entries: typeof allEntries) =>
-    entries.map(({ currency, amount }) => ({ currency, amount }));
   const isUnreserved = (entry: typeof allEntries[number]) =>
     entry.payoutId === null && entry.payoutAllocations.length === 0;
-  const isPaidOrderWithoutBlockingReturn = (entry: typeof allEntries[number]) =>
-    entry.vendorOrder !== null &&
-    entry.vendorOrder.order.status === "PAID" &&
-    entry.vendorOrder.order.paymentStatus === "SUCCEEDED" &&
-    entry.vendorOrder.lines.every((line) => line.returns.length === 0);
   const isOrderPayoutEligible = (entry: typeof allEntries[number]) =>
-    entry.vendorOrder?.status === "DELIVERED" &&
-    isPaidOrderWithoutBlockingReturn(entry) &&
-    entry.vendorOrder.deliveredAt !== null &&
-    entry.vendorOrder.deliveredAt < cutoff;
+    entry.vendorOrder !== null && vendorOrderPayoutEligible({
+      paymentStatus: entry.vendorOrder.order.paymentStatus,
+      orderStatus: entry.vendorOrder.order.status,
+      vendorStatus: entry.vendorOrder.status,
+      deliveredAt: entry.vendorOrder.deliveredAt,
+      cutoff,
+      hasBlockingReturn: entry.vendorOrder.lines.some((line) => line.returns.length > 0),
+    });
   const pendingEntries = allEntries.filter((entry) =>
     isUnreserved(entry) &&
-    (
-      (sourceTypes.includes(entry.type as typeof sourceTypes[number]) &&
-        isPaidOrderWithoutBlockingReturn(entry) &&
-        !isOrderPayoutEligible(entry)) ||
-      balanceAdjustmentTypes.includes(entry.type as typeof balanceAdjustmentTypes[number])
-    ),
+    sourceTypes.includes(entry.type as typeof sourceTypes[number]) &&
+    (!entry.vendorOrder || !isOrderPayoutEligible(entry)),
   );
-  const availableEntries = allEntries.filter((entry) =>
-    isUnreserved(entry) &&
-    (
-      (isOrderPayoutEligible(entry) && sourceTypes.includes(entry.type as typeof sourceTypes[number])) ||
-      balanceAdjustmentTypes.includes(entry.type as typeof balanceAdjustmentTypes[number])
-    ),
-  );
+  const financialSummary = summarizeVendorLedger(allEntries.map((entry) => {
+    const activePayout = entry.payoutAllocations.some((allocation) =>
+      ["PENDING", "APPROVED", "PROCESSING", "FAILED"].includes(allocation.payout.status),
+    );
+    const bucket = activePayout
+      ? "PROCESSING" as const
+      : isUnreserved(entry) && sourceTypes.includes(entry.type as typeof sourceTypes[number])
+        ? (!entry.vendorOrder || !isOrderPayoutEligible(entry) ? "PENDING" as const : "ELIGIBLE" as const)
+        : isUnreserved(entry) && balanceAdjustmentTypes.includes(entry.type as typeof balanceAdjustmentTypes[number])
+          ? "ELIGIBLE" as const
+          : undefined;
+    return { type: entry.type, amount: entry.amount, currency: entry.currency, bucket };
+  }));
+  const pendingOrderGroups = new Map<string, typeof allEntries>();
+  for (const entry of pendingEntries) {
+    const key = entry.vendorOrder?.id ?? `${entry.order?.orderNumber ?? "unlinked"}:${entry.currency}`;
+    const group = pendingOrderGroups.get(key) ?? [];
+    group.push(entry);
+    pendingOrderGroups.set(key, group);
+  }
+  const pendingOrders = [...pendingOrderGroups.values()].map((entries) => {
+    const first = entries[0]!;
+    const vendorOrder = first.vendorOrder;
+    const hasBlockingReturn = vendorOrder?.lines.some((line) => line.returns.length > 0) ?? false;
+    const reason = vendorOrder
+      ? vendorOrderPayoutPendingReason({
+        paymentStatus: vendorOrder.order.paymentStatus,
+        orderStatus: vendorOrder.order.status,
+        vendorStatus: vendorOrder.status,
+        deliveredAt: vendorOrder.deliveredAt,
+        cutoff,
+        hasBlockingReturn,
+      }) ?? "ORDER_RECONCILIATION_REQUIRED"
+      : "ORDER_RECONCILIATION_REQUIRED";
+    const products = vendorOrder?.lines ?? [];
+    const commission = products.reduce(
+      (total, line) => total.add(line.commissionAmount ?? 0),
+      new Prisma.Decimal(0),
+    );
+    const grossSales = products.reduce(
+      (total, line) => total.add(lineGross(line.unitPrice, line.quantity)),
+      new Prisma.Decimal(0),
+    );
+    return {
+      orderNumber: vendorOrder?.order.orderNumber ?? first.order?.orderNumber ?? null,
+      currency: first.currency,
+      vendorOrderId: vendorOrder?.id ?? null,
+      grossSales: money(grossSales),
+      commission: money(commission),
+      vendorNetEarnings: money(sumLedgerAmounts(entries)),
+      products: products.map((line) => ({
+        name: line.productName,
+        quantity: line.quantity,
+        grossSales: money(lineGross(line.unitPrice, line.quantity)),
+        commissionRate: line.commissionPercent?.toString() ?? null,
+        commission: line.commissionAmount === null ? null : money(line.commissionAmount),
+      })),
+      deliveryStatus: vendorOrder?.status ?? "UNKNOWN",
+      deliveredAt: vendorOrder?.deliveredAt?.toISOString() ?? null,
+      eligibilityDate: vendorOrder?.deliveredAt
+        ? new Date(vendorOrder.deliveredAt.getTime() + PAYOUT_HOLD_MS).toISOString()
+        : null,
+      pendingReason: reason,
+      blockingReturnStatuses: vendorOrder?.lines.flatMap((line) => line.returns.map((request) => request.status)) ?? [],
+    };
+  });
 
   const nextCursor = pageEntries.length === Math.min(Math.max(filters.limit ?? 50, 1), 100)
     ? pageEntries.at(-1)?.id ?? null
     : null;
   return {
+    vendorName: vendor.vendorProfile?.storeName ?? vendor.displayName ?? "",
     summary: {
-      totalSales: totalsByCurrency(allByCurrency(allEntries.filter((entry) => entry.type === "SALE" && entry.amount.gt(0)))),
-      netEarnings: totalsByCurrency(allByCurrency(allEntries.filter((entry) => entry.type !== "PAYOUT"))),
-      totalCommission: totalsByCurrency(allByCurrency(allEntries.filter((entry) => entry.type === "COMMISSION").map((entry) => ({ ...entry, amount: entry.amount.neg() })))),
-      vendorCouponDiscounts: totalsByCurrency(allByCurrency(allEntries.filter((entry) => entry.type === "VENDOR_DISCOUNT").map((entry) => ({ ...entry, amount: entry.amount.neg() })))),
-      totalRefunds: totalsByCurrency(allByCurrency(allEntries.filter((entry) => entry.type === "REFUND" || entry.type === "REFUND_ADJUSTMENT").map((entry) => ({ ...entry, amount: entry.amount.neg() })))),
-      deliveryFees: totalsByCurrency(allByCurrency(allEntries.filter((entry) => entry.type === "DELIVERY_FEE"))),
-      pendingEarnings: totalsByCurrency(allByCurrency(pendingEntries)),
-      availablePayoutBalance: totalsByCurrency(allByCurrency(availableEntries)),
-      totalAlreadyPaid: totalsByCurrency(payouts),
-      negativeBalance: totalsByCurrency([...new Set(allEntries.map((entry) => entry.currency))]
-        .map((currency) => {
-          const balance = sumLedgerAmounts(allEntries.filter((entry) => entry.currency === currency));
-          return { currency, amount: Prisma.Decimal.min(balance, 0).abs() };
-        })
-        .filter((entry) => entry.amount.gt(0))),
+      ...financialSummary,
+      deliveryFees: totalsByCurrency(allEntries.filter((entry) => entry.type === "DELIVERY_FEE")),
       simulated: true,
     },
-    entries: pageEntries.map((entry) => ({
-      id: entry.id,
-      createdAt: entry.createdAt.toISOString(),
-      orderNumber: entry.order?.orderNumber ?? null,
-      vendorOrderId: entry.vendorOrder?.id ?? null,
-      transactionType: entry.type,
-      amount: money(entry.amount),
-      currency: entry.currency,
-      commissionPercent: entry.orderLine?.commissionPercent?.toString() ?? null,
-      description: entry.description,
-      couponCode: entry.coupon?.code ?? null,
-      payoutReference: entry.payoutAllocations[0]?.payout.reference ?? entry.payout?.reference ?? null,
-      payoutStatus: entry.payoutAllocations[0]?.payout.status ?? entry.payout?.status ?? (entry.payoutId ? "PENDING" : "UNPAID"),
-      simulated: entry.simulated,
-    })),
+    pendingOrders,
+    entries: pageEntries.map((entry) => {
+      const payout = entry.payoutAllocations[0]?.payout ?? entry.payout;
+      const payoutStatus = payout?.status === "PENDING"
+        ? (payout.batchId ? "BATCH_CREATED" : "PENDING")
+        : payout?.status === "APPROVED" || payout?.status === "PROCESSING"
+          ? "PROCESSING"
+          : payout?.status ?? (entry.payoutId ? "SIMULATED_PAID"
+            : balanceAdjustmentTypes.includes(entry.type as typeof balanceAdjustmentTypes[number]) ? "ELIGIBLE"
+              : sourceTypes.includes(entry.type as typeof sourceTypes[number]) && entry.vendorOrder
+                ? (vendorOrderPayoutEligible({
+                  paymentStatus: entry.vendorOrder.order.paymentStatus,
+                  orderStatus: entry.vendorOrder.order.status,
+                  vendorStatus: entry.vendorOrder.status,
+                  deliveredAt: entry.vendorOrder.deliveredAt,
+                  cutoff,
+                  hasBlockingReturn: entry.vendorOrder.lines.some((line) => line.returns.length > 0),
+                }) ? "ELIGIBLE" : "PENDING")
+                : "UNPAID");
+      return {
+        id: entry.id,
+        createdAt: entry.createdAt.toISOString(),
+        orderNumber: entry.order?.orderNumber ?? entry.vendorOrder?.order.orderNumber ?? null,
+        vendorOrderId: entry.vendorOrder?.id ?? null,
+        transactionType: entry.type,
+        amount: money(entry.amount),
+        currency: entry.currency,
+        commissionPercent: entry.orderLine?.commissionPercent?.toString() ?? null,
+        commissionDetails: entry.vendorOrder?.lines.map((line) => ({
+          product: line.productName,
+          rate: line.commissionPercent?.toString() ?? null,
+          amount: line.commissionAmount === null ? null : money(line.commissionAmount),
+        })) ?? [],
+        description: entry.description,
+        couponCode: entry.coupon?.code ?? null,
+        payoutReference: payout?.reference ?? null,
+        payoutStatus,
+        simulated: entry.simulated,
+      };
+    }),
     payouts: await prisma.vendorPayout.findMany({
       where: { vendorId },
       orderBy: { createdAt: "desc" },
       take: 100,
       include: {
-        entries: { where: { type: { not: "PAYOUT" } }, include: { order: { select: { orderNumber: true } } } },
+        batch: { select: { weekKey: true } },
+        entries: { where: { type: { not: "PAYOUT" } }, include: { order: { select: { orderNumber: true } }, vendorOrder: { include: { order: { select: { orderNumber: true } } } } } },
         allocations: {
           where: { releasedAt: null },
-          include: { ledgerEntry: { include: { order: { select: { orderNumber: true } } } } },
+          include: {
+            ledgerEntry: {
+              include: {
+                order: { select: { orderNumber: true, status: true, paymentStatus: true } },
+                vendorOrder: { include: { order: { select: { orderNumber: true } } } },
+              },
+            },
+          },
         },
       },
     }).then((items) => items.map((payout) => ({
       id: payout.id,
       reference: payout.reference,
+      batchReference: payout.batch?.weekKey ?? null,
       date: payout.processedAt?.toISOString() ?? payout.createdAt.toISOString(),
       amount: money(payout.amount),
       currency: payout.currency,
-      status: payout.status,
+      status: payout.status === "PENDING" && payout.batchId
+        ? "BATCH_CREATED"
+        : payout.status === "APPROVED" ? "PROCESSING" : payout.status,
       simulated: payout.simulated,
+      orderCount: new Set([
+        ...payout.entries.map((entry) => entry.vendorOrder?.order.orderNumber ?? entry.order?.orderNumber),
+        ...payout.allocations.map((allocation) => allocation.ledgerEntry.vendorOrder?.order.orderNumber ?? allocation.ledgerEntry.order?.orderNumber),
+      ].filter((number): number is string => Boolean(number))).size,
       coveredOrders: [...new Set([
-        ...payout.entries.map((entry) => entry.order?.orderNumber),
-        ...payout.allocations.map((allocation) => allocation.ledgerEntry.order?.orderNumber),
+        ...payout.entries.map((entry) => entry.vendorOrder?.order.orderNumber ?? entry.order?.orderNumber),
+        ...payout.allocations.map((allocation) => allocation.ledgerEntry.vendorOrder?.order.orderNumber ?? allocation.ledgerEntry.order?.orderNumber),
       ].filter((number): number is string => Boolean(number)))],
     }))),
     nextCursor,

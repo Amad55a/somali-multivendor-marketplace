@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import type { Locale } from "@/i18n/config";
@@ -339,9 +340,12 @@ export function ApplicationDetail({
                     className="mt-2 block text-start text-sm font-semibold text-[#8b5e08] hover:underline"
                   >
                     {file.originalName}
-                    <img
+                    <Image
                       src={`/api/v1/vendor/application-files/${file.id}`}
                       alt={file.fileType === "STORE_LOGO" ? t("auth.storeLogo") : t("auth.businessLicense")}
+                      width={128}
+                      height={128}
+                      unoptimized
                       className="mt-3 size-32 rounded-xl border border-[#e1e9e5] object-cover"
                     />
                   </button>
@@ -377,12 +381,19 @@ export function ApplicationDetail({
               >
                 ×
               </button>
-              <img
-                src={`/api/v1/vendor/application-files/${previewFile.id}`}
-                alt={previewFile.originalName}
+              <div
+                className="relative h-[90vh] w-[95vw]"
                 onClick={(event) => event.stopPropagation()}
-                className="max-h-[90vh] max-w-[95vw] rounded-lg object-contain shadow-2xl"
-              />
+              >
+                <Image
+                  src={`/api/v1/vendor/application-files/${previewFile.id}`}
+                  alt={previewFile.originalName}
+                  fill
+                  sizes="95vw"
+                  unoptimized
+                  className="rounded-lg object-contain shadow-2xl"
+                />
+              </div>
             </div>
           )}
 
@@ -468,7 +479,7 @@ export function ApplicationDetail({
               <div className="mt-4 flex flex-wrap gap-3">
                 {application.pendingChangeRequest.files.map((file) => (
                   file.mimeType.startsWith("image/") ? (
-                    <img key={file.id} src={`/api/v1/vendor/profile-change-files/${file.id}`} alt={file.originalName} className="size-24 rounded-xl object-cover" />
+                    <Image key={file.id} src={`/api/v1/vendor/profile-change-files/${file.id}`} alt={file.originalName} width={96} height={96} unoptimized className="size-24 rounded-xl object-cover" />
                   ) : (
                     <a key={file.id} href={`/api/v1/vendor/profile-change-files/${file.id}`} className="text-sm font-semibold text-[#8b5e08]">{file.originalName}</a>
                   )

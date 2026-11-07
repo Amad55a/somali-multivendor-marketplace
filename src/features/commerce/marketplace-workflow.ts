@@ -326,7 +326,7 @@ export async function cancelCheckoutReservation(
       grouped.set(vendorId, [...(grouped.get(vendorId) ?? []), item]);
     }
     let amount = new Prisma.Decimal(0);
-    for (const [vendorId, items] of grouped) {
+    for (const items of grouped.values()) {
       amount = amount.add(items.reduce(
         (sum, item) => sum.add(new Prisma.Decimal(item.unitPrice).mul(item.quantity)),
         new Prisma.Decimal(0),

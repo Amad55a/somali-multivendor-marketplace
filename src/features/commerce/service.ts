@@ -787,11 +787,14 @@ export async function vendorAnalytics(user: AuthenticatedUser) {
       totalCommission: statement.summary.totalCommission,
       vendorDiscounts: statement.summary.vendorCouponDiscounts,
       totalRefunds: statement.summary.totalRefunds,
+      totalAdjustments: statement.summary.totalAdjustments,
       deliveryFees: statement.summary.deliveryFees,
       netEarnings: statement.summary.netEarnings,
       pendingEarnings: statement.summary.pendingEarnings,
       availablePayoutBalance: statement.summary.availablePayoutBalance,
+      payoutProcessing: statement.summary.payoutProcessing,
       alreadyPaid: statement.summary.totalAlreadyPaid,
+      negativeBalance: statement.summary.negativeBalance,
     },
     topProducts: [...productSales.values()]
       .sort((a, b) => b.quantity - a.quantity)

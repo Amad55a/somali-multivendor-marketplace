@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { z } from "zod";
 import { postJson, requestApi } from "@/lib/api/client";
 
@@ -55,34 +55,74 @@ function formatDate(value?: string) {
   return date.toLocaleString();
 }
 
+function fetchCoupons(mode: CouponMode) {
+  return requestApi(
+    mode === "vendor" ? "/api/v1/vendor/coupons" : "/api/v1/admin/coupons",
+    listSchema,
+    "Could not load coupons.",
+  ).then((data) => (Array.isArray(data.coupons) ? data.coupons : []));
+}
+
 export function CouponManager({ mode }: { mode: CouponMode }) {
+  return <CouponManagerContent key={mode} mode={mode} />;
+}
+
+function CouponManagerContent({ mode }: { mode: CouponMode }) {
   const [coupons, setCoupons] = useState<CouponRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
-
-  const loadCoupons = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await requestApi(
-        mode === "vendor" ? "/api/v1/vendor/coupons" : "/api/v1/admin/coupons",
-        listSchema,
-        "Could not load coupons.",
-      );
-      setCoupons(Array.isArray(data.coupons) ? data.coupons : []);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not load coupons.");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const requestSequence = useRef(0);
+  const isMounted = useRef(false);
 
   useEffect(() => {
-    void loadCoupons();
+    isMounted.current = true;
+    const requestId = ++requestSequence.current;
+    let active = true;
+    void fetchCoupons(mode)
+      .then((loadedCoupons) => {
+        if (active && requestId === requestSequence.current) {
+          setCoupons(loadedCoupons);
+          setError(null);
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active && requestId === requestSequence.current) {
+          setError(loadError instanceof Error ? loadError.message : "Could not load coupons.");
+        }
+      })
+      .finally(() => {
+        if (active && requestId === requestSequence.current) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+      isMounted.current = false;
+      requestSequence.current += 1;
+    };
   }, [mode]);
+
+  async function reloadCoupons() {
+    const requestId = ++requestSequence.current;
+    try {
+      const loadedCoupons = await fetchCoupons(mode);
+      if (isMounted.current && requestId === requestSequence.current) {
+        setCoupons(loadedCoupons);
+        setError(null);
+      }
+    } catch (loadError) {
+      if (isMounted.current && requestId === requestSequence.current) {
+        setError(loadError instanceof Error ? loadError.message : "Could not load coupons.");
+      }
+    } finally {
+      if (isMounted.current && requestId === requestSequence.current) {
+        setLoading(false);
+      }
+    }
+  }
 
   const updateField = (field: keyof typeof emptyForm) => (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const nextValue = event.target instanceof HTMLInputElement && event.target.type === "checkbox"
@@ -142,7 +182,9 @@ export function CouponManager({ mode }: { mode: CouponMode }) {
 
       setMessage(result.coupon ? "Coupon saved successfully." : "Coupon saved successfully.");
       setForm({ ...emptyForm, startsAt: "", endsAt: "" });
-      await loadCoupons();
+      setLoading(true);
+      setError(null);
+      await reloadCoupons();
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Coupon could not be saved.");
     } finally {

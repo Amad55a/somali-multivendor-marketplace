@@ -88,7 +88,7 @@ export function StoreProfile({ profile }: Readonly<{ profile: Profile | null }>)
       if (address.trim()) fields.address = address.trim();
       if (marketAssociation.trim()) fields.marketAssociation = marketAssociation.trim();
       if (vendorNote.trim()) fields.vendorNote = vendorNote.trim();
-      const result = await requestApi(
+      await requestApi(
         "/api/v1/vendor/profile-changes/submit",
         savedSchema,
         t("auth.requestFailed"),

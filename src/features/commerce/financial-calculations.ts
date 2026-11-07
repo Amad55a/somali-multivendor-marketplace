@@ -36,6 +36,40 @@ export function sumLedgerAmounts(entries: Array<{ amount: Prisma.Decimal }>) {
   );
 }
 
+export type VendorLedgerBucket = "PENDING" | "ELIGIBLE" | "PROCESSING";
+
+export function summarizeVendorLedger(entries: Array<{
+  type: string;
+  amount: Prisma.Decimal;
+  currency: string;
+  bucket?: VendorLedgerBucket;
+}>) {
+  const currencies = [...new Set(entries.map((entry) => entry.currency))];
+  const sum = (currency: string, predicate: (entry: typeof entries[number]) => boolean) =>
+    sumLedgerAmounts(entries.filter((entry) => entry.currency === currency && predicate(entry)));
+  const totals = (selectAmount: (currency: string) => Prisma.Decimal) =>
+    currencies.map((currency) => ({ currency, amount: selectAmount(currency).toFixed(2) }));
+  return {
+    totalSales: totals((currency) => sum(currency, (entry) => entry.type === "SALE" && entry.amount.gt(0))),
+    netEarnings: totals((currency) => sum(currency, (entry) => entry.type !== "PAYOUT")),
+    totalCommission: totals((currency) => sum(currency, (entry) => entry.type === "COMMISSION").abs()),
+    vendorCouponDiscounts: totals((currency) => sum(currency, (entry) => entry.type === "VENDOR_DISCOUNT").abs()),
+    totalRefunds: totals((currency) => sum(currency, (entry) => entry.type === "REFUND").abs()),
+    totalAdjustments: totals((currency) => sum(currency, (entry) => entry.type === "REFUND_ADJUSTMENT" || entry.type === "ADJUSTMENT")),
+    pendingEarnings: totals((currency) => sum(currency, (entry) => entry.bucket === "PENDING")),
+    availablePayoutBalance: totals((currency) => Prisma.Decimal.max(
+      sum(currency, (entry) => entry.bucket === "ELIGIBLE"),
+      0,
+    )),
+    payoutProcessing: totals((currency) => sum(currency, (entry) => entry.bucket === "PROCESSING")),
+    totalAlreadyPaid: totals((currency) => sum(currency, (entry) => entry.type === "PAYOUT").abs()),
+    negativeBalance: totals((currency) => Prisma.Decimal.min(
+      sum(currency, () => true),
+      0,
+    ).abs()),
+  };
+}
+
 export function summarizeLedgerEntriesByVendorCurrency(
   entries: Array<{
     id: string;
@@ -127,12 +161,34 @@ export function vendorOrderPayoutEligible(input: {
   cutoff: Date;
   hasBlockingReturn: boolean;
 }) {
-  return input.paymentStatus === "SUCCEEDED"
-    && input.orderStatus === "PAID"
-    && input.vendorStatus === "DELIVERED"
-    && input.deliveredAt !== null
-    && input.deliveredAt.getTime() < input.cutoff.getTime()
-    && !input.hasBlockingReturn;
+  return vendorOrderPayoutPendingReason(input) === null;
+}
+
+export type PayoutPendingReason =
+  | "PAYMENT_NOT_SETTLED"
+  | "BLOCKING_RETURN"
+  | "AWAITING_DELIVERY"
+  | "SEVEN_DAY_HOLD";
+
+export function vendorOrderPayoutPendingReason(input: {
+  paymentStatus: string;
+  orderStatus: string;
+  vendorStatus: string;
+  deliveredAt: Date | null;
+  cutoff: Date;
+  hasBlockingReturn: boolean;
+}): PayoutPendingReason | null {
+  if (input.paymentStatus !== "SUCCEEDED" || input.orderStatus !== "PAID") {
+    return "PAYMENT_NOT_SETTLED";
+  }
+  if (input.hasBlockingReturn) return "BLOCKING_RETURN";
+  if (input.vendorStatus !== "DELIVERED" || !input.deliveredAt) {
+    return "AWAITING_DELIVERY";
+  }
+  if (input.deliveredAt.getTime() >= input.cutoff.getTime()) {
+    return "SEVEN_DAY_HOLD";
+  }
+  return null;
 }
 
 export function capturedLedgerKey(type: string, vendorOrderId: string, orderLineId?: string) {
