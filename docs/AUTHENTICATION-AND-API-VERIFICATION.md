@@ -18,17 +18,17 @@ JSON and must not store authentication credentials in web storage.
 
 Authenticated users are redirected away from login and registration pages:
 
-- CUSTOMER -> `/{locale}/customer/account`
+- CUSTOMER -> `/{locale}/customer/dashboard`
 - APPROVED VENDOR -> `/{locale}/vendor/dashboard`
 - Other VENDOR application states -> `/{locale}/vendor/status`
 - ADMIN -> `/{locale}/admin/overview`
 
-The existing customer account page is the customer dashboard route. It is
-preserved rather than creating a duplicate `/customer/dashboard` page.
+The customer dashboard is `/{locale}/customer/dashboard`; the separate
+`/{locale}/customer/account` route contains profile settings.
 
 ### Protected areas
 
-- Customer: `/{locale}/customer/account`
+- Customer: `/{locale}/customer/dashboard`, `/{locale}/customer/account`
 - Vendor onboarding/status: `/{locale}/vendor/onboarding`,
   `/{locale}/vendor/status`
 - Approved vendor dashboard: `/{locale}/vendor/dashboard`,

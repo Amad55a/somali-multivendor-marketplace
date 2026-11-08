@@ -422,21 +422,25 @@ describe("administrator authentication and MFA", () => {
       verifyAdminMfa(replayChallenge.challengeId, enrollment.recoveryCodes[0]),
     ).rejects.toMatchObject({ code: "INVALID_MFA_CODE" });
 
-    const session = await prisma.userSession.findFirstOrThrow({
-      where: { userId: admin.id, revokedAt: null },
-      orderBy: { createdAt: "desc" },
-    });
+    const recoveryAdmin = await requireUser(
+      sessionRequest(recoveryLogin.session.token),
+      ["ADMIN"],
+    );
     await prisma.userSession.update({
-      where: { id: session.id },
-      data: { lastActivityAt: new Date(Date.now() - 11 * 60 * 1000) },
+      where: { id: recoveryAdmin.sessionId },
+      data: { lastActivityAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000) },
     });
     const expiredAdmin = await prisma.userSession.findUniqueOrThrow({
-      where: { id: session.id },
+      where: { id: recoveryAdmin.sessionId },
     });
+    expect(expiredAdmin.expiresAt.getTime()).toBeGreaterThan(Date.now());
     await expect(
       requireUser(sessionRequest(recoveryLogin.session.token)),
     ).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
-    expect(expiredAdmin.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    const revokedAdmin = await prisma.userSession.findUniqueOrThrow({
+      where: { id: recoveryAdmin.sessionId },
+    });
+    expect(revokedAdmin.revokedAt).toBeInstanceOf(Date);
   });
 });
 
@@ -445,7 +449,7 @@ describe("vendor onboarding and admin review", () => {
     const reviewer = await createAdmin(uniqueEmail());
     const reviewerPrincipal = principal(reviewer.id, reviewer.email, "ADMIN");
     const pendingVendor = await createVerifiedVendor();
-    const pending = await createDraft(pendingVendor, completeApplication("Pending Store"));
+    const pending = await createCompleteDraft(pendingVendor, "Pending Store");
     entityIds.push(pending.application.id);
     await submitApplication(pendingVendor);
 
@@ -472,10 +476,7 @@ describe("vendor onboarding and admin review", () => {
     });
 
     const approvedVendor = await createVerifiedVendor();
-    const application = await createDraft(
-      approvedVendor,
-      completeApplication("Approved Store"),
-    );
+    const application = await createCompleteDraft(approvedVendor, "Approved Store");
     entityIds.push(application.application.id);
     await submitApplication(approvedVendor);
     await reviewApplication(
@@ -596,7 +597,7 @@ describe("Amazon OAuth and rate limiting", () => {
       fetchMock,
     );
     expect(customerCallback.status).toBe(303);
-    expect(customerCallback.headers.get("location")).toContain("/en/customer/home");
+    expect(customerCallback.headers.get("location")).toContain("/en/customer/dashboard");
     expect(customerCallback.headers.get("set-cookie")).toContain("marketplace_session=");
 
     const customer = await prisma.user.findUniqueOrThrow({
@@ -617,7 +618,7 @@ describe("Amazon OAuth and rate limiting", () => {
       fetchMock,
     );
     expect(customerLogin.headers.get("set-cookie")).toContain("marketplace_session=");
-    expect(customerLogin.headers.get("location")).toContain("/en/customer/home");
+    expect(customerLogin.headers.get("location")).toContain("/en/customer/dashboard");
 
     const vendorCallback = await completeAmazonFlow(
       "VENDOR",
@@ -677,6 +678,31 @@ describe("Amazon OAuth and rate limiting", () => {
 async function createVerifiedVendor(): Promise<AuthenticatedUser> {
   const account = await createVerifiedAccount("VENDOR", uniqueEmail());
   return principal(account.id, account.email, "VENDOR");
+}
+
+async function createCompleteDraft(user: AuthenticatedUser, storeName: string) {
+  const draft = await createDraft(user, completeApplication(storeName));
+  await prisma.vendorApplicationFile.createMany({
+    data: [
+      {
+        vendorProfileId: draft.application.id,
+        fileType: "STORE_LOGO",
+        storageKey: `integration/${randomUUID()}/store-logo.png`,
+        originalName: "store-logo.png",
+        mimeType: "image/png",
+        sizeBytes: 1,
+      },
+      {
+        vendorProfileId: draft.application.id,
+        fileType: "BUSINESS_LICENSE",
+        storageKey: `integration/${randomUUID()}/business-license.pdf`,
+        originalName: "business-license.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+      },
+    ],
+  });
+  return draft;
 }
 
 async function createVerifiedCustomer() {
@@ -740,6 +766,7 @@ function completeApplication(storeName: string) {
     city: "Mogadishu",
     address: "Market district",
     marketAssociation: "Local market",
+    mobileMoneyNumber: "+252611234567",
   };
 }
 
