@@ -63,7 +63,7 @@ export function AdminShell({
                       : pathname.includes("/financial-reconciliation")
                         ? t("admin.navigation.reconciliation")
                     : pathname.includes("/coupons")
-                      ? "Coupons"
+                      ? t("admin.navigation.coupons")
                       : pathname.includes("/payouts")
                         ? t("admin.navigation.payoutManagement")
                       : pathname.includes("/reviews")
@@ -76,6 +76,10 @@ export function AdminShell({
                       ? t("admin.navigation.analytics")
                       : pathname.includes("/notifications")
                         ? t("admin.navigation.notifications")
+                        : pathname.includes("/communication-reports")
+                          ? t("admin.navigation.communicationReports")
+                        : pathname.includes("/support")
+                          ? t("support.navLabel")
                         : pathname.includes("/settings")
                           ? t("admin.navigation.settings")
                           : t("admin.navigation.overview");

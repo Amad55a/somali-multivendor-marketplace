@@ -5,6 +5,7 @@ import type {
 import type { AuthenticatedUser } from "@/features/auth/sessions";
 import { AppError } from "@/lib/errors/app-error";
 import { prisma } from "@/lib/prisma";
+import { removeVendorFile } from "@/lib/media/vendor-files";
 
 export async function getAdminOverview() {
   const [
@@ -195,7 +196,7 @@ export async function suspendAdminUser(
   return { userId: target.id, active: false };
 }
 
-export async function deleteAdminUser(
+export async function anonymizeAdminUser(
   actor: AuthenticatedUser,
   userId: string,
 ) {
@@ -204,23 +205,135 @@ export async function deleteAdminUser(
   }
   const target = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true, accountType: true },
+    select: {
+      id: true,
+      accountType: true,
+      profileImageKey: true,
+      vendorProfile: {
+        select: {
+          id: true,
+          files: { select: { storageKey: true } },
+          changeRequests: {
+            select: { files: { select: { storageKey: true } } },
+          },
+        },
+      },
+      productImages: { select: { storageKey: true } },
+      products: { select: { id: true } },
+    },
   });
   if (!target) throw new AppError("USER_NOT_FOUND", 404, "User not found.");
 
+  const storageKeys = [
+    target.profileImageKey,
+    ...target.productImages.map((image) => image.storageKey),
+    ...(target.vendorProfile?.files.map((file) => file.storageKey) ?? []),
+    ...(target.vendorProfile?.changeRequests.flatMap((request) =>
+      request.files.map((file) => file.storageKey),
+    ) ?? []),
+  ].filter((key): key is string => key !== null);
+  const anonymizedEmail = `deleted+${target.id}@deleted.invalid`;
+  const now = new Date();
+
   await prisma.$transaction(async (transaction) => {
+    await transaction.user.update({
+      where: { id: target.id },
+      data: {
+        email: anonymizedEmail,
+        normalizedEmail: anonymizedEmail,
+        displayName: null,
+        profileImageKey: null,
+        emailVerifiedAt: null,
+        isActive: false,
+      },
+    });
+    await transaction.userAuthAccount.deleteMany({ where: { userId: target.id } });
+    await transaction.userSession.deleteMany({ where: { userId: target.id } });
+    await transaction.emailVerificationCode.deleteMany({ where: { userId: target.id } });
+    await transaction.loginAttempt.deleteMany({ where: { userId: target.id } });
+    await transaction.shoppingCart.deleteMany({ where: { userId: target.id } });
+    await transaction.adminMfaMethod.deleteMany({ where: { userId: target.id } });
+    await transaction.adminRecoveryCode.deleteMany({ where: { userId: target.id } });
+    await transaction.adminLoginChallenge.deleteMany({ where: { userId: target.id } });
+    await transaction.auditLog.updateMany({
+      where: { entityType: "User", entityId: target.id, action: "USER_SUSPENDED" },
+      data: { metadata: { accountType: target.accountType, anonymized: true } },
+    });
+    if (target.vendorProfile) {
+      await transaction.vendorProfile.update({
+        where: { id: target.vendorProfile.id },
+        data: {
+          applicationStatus: "SUSPENDED",
+          verificationStatus: "UNVERIFIED",
+          businessName: null,
+          storeName: null,
+          businessType: null,
+          description: null,
+          contactName: null,
+          phone: null,
+          country: null,
+          region: null,
+          city: null,
+          district: null,
+          address: null,
+          marketAssociation: null,
+          mobileMoneyNumber: null,
+          submittedAt: null,
+          rejectionReason: null,
+          informationRequest: null,
+          deliveryFee: 0,
+        },
+      });
+      await transaction.vendorApplicationEmail.deleteMany({
+        where: { vendorProfileId: target.vendorProfile.id },
+      });
+      await transaction.vendorApplicationFile.deleteMany({
+        where: { vendorProfileId: target.vendorProfile.id },
+      });
+      await transaction.vendorProfileChangeRequest.deleteMany({
+        where: { vendorProfileId: target.vendorProfile.id },
+      });
+    }
+    if (target.accountType === "VENDOR") {
+      await transaction.productImage.deleteMany({ where: { vendorId: target.id } });
+      for (const product of target.products) {
+        await transaction.product.update({
+          where: { id: product.id },
+          data: {
+            name: "Removed listing",
+            slug: `removed-${product.id}`,
+            nameSo: null,
+            description: null,
+            descriptionSo: null,
+            brand: null,
+            condition: null,
+            status: "ARCHIVED",
+            marketAssociation: null,
+            country: null,
+            region: null,
+            city: null,
+            marketName: null,
+            publishedAt: null,
+            archivedAt: now,
+          },
+        });
+      }
+    }
     await transaction.auditLog.create({
       data: {
         actorUserId: actor.id,
-        action: "USER_DELETED",
+        action: "USER_ANONYMIZED",
         entityType: "User",
         entityId: target.id,
-        metadata: { email: target.email, accountType: target.accountType },
+        metadata: { accountType: target.accountType, marketplaceHistoryRetained: true },
       },
     });
-    await transaction.user.delete({ where: { id: target.id } });
   });
-  return { userId: target.id, deleted: true };
+
+  for (const storageKey of storageKeys) {
+    await removeVendorFile(storageKey);
+  }
+  return { userId: target.id, anonymized: true };
 }
 
 function readableEmailName(email: string): string {

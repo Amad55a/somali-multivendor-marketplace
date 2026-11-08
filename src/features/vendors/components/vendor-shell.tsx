@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { Bell, Boxes, ChevronDown, FolderTree, LayoutDashboard, Menu, Package, Settings, ShoppingCart, UserCircle, BarChart3, Search, Store, RotateCcw } from "lucide-react";
+import { Bell, Boxes, ChevronDown, FolderTree, LayoutDashboard, Menu, Package, Settings, ShoppingCart, UserCircle, BarChart3, Search, Store, RotateCcw, MessageSquareText, LifeBuoy } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { requestApi } from "@/lib/api/client";
 import { z } from "zod";
@@ -14,18 +14,23 @@ import { LogoutButton } from "@/features/auth/components/logout-button";
 import { SomsuuqLogo } from "@/components/shared/somsuuq-logo";
 import { LanguageSwitcher } from "@/components/shared/language-switcher";
 import { useVisiblePolling } from "@/lib/hooks/use-visible-polling";
+import { VendorNotificationBell } from "@/features/vendors/components/vendor-notification-bell";
 
 const pageTitles: Record<string, TranslationKey> = {
   dashboard: "vendor.overviewTitle",
   store: "vendor.storeTitle",
   products: "vendor.productsTitle",
   categories: "vendor.categoriesTitle",
+  coupons: "vendor.couponsTitle",
   orders: "vendor.ordersTitle",
   returns: "vendor.returnsTitle",
   inventory: "vendor.inventoryTitle",
   analytics: "vendor.analyticsTitle",
   payouts: "finance.payoutTitle",
   notifications: "vendor.notificationsTitle",
+  communications: "vendor.communicationsTitle",
+  messages: "communications.title",
+  help: "support.navLabel",
   settings: "vendor.settingsTitle",
 };
 
@@ -34,33 +39,42 @@ export function VendorShell({ children, locale, email, storeName, logoFileId }: 
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [unread, setUnread] = useState(0);
-  const loadNotifications = useCallback(async () => {
-    const result = await requestApi("/api/v1/vendor/notifications", z.object({ unreadCount: z.number() }), t("auth.requestFailed"));
-    setUnread(result.unreadCount);
+  const [unreadMessages, setUnreadMessages] = useState(0);
+  const loadUnreadMessages = useCallback(async () => {
+    try {
+      const result = await requestApi(
+        "/api/v1/conversations",
+        z.object({ conversations: z.array(z.object({ unreadCount: z.number() })) }),
+        t("auth.requestFailed"),
+      );
+      setUnreadMessages(result.conversations.reduce((total, item) => total + item.unreadCount, 0));
+    } catch (error) {
+      console.error("[vendor] Could not load unread message count", error);
+    }
   }, [t]);
-  useVisiblePolling(loadNotifications, 30_000);
+  useVisiblePolling(loadUnreadMessages, 30_000);
   const pageKey = pathname.split("/").filter(Boolean).at(-1) ?? "dashboard";
-  const pageTitle = pathname.includes("/coupons") ? "Coupons" : t(pageTitles[pageKey] ?? "vendor.overviewTitle");
+  const pageTitle = t(pageTitles[pageKey] ?? "vendor.overviewTitle");
   const links = [
     { href: `/${locale}/vendor/dashboard`, label: t("vendor.nav.dashboard"), icon: LayoutDashboard },
     { href: `/${locale}/vendor/store`, label: t("vendor.nav.store"), icon: Store },
     { href: `/${locale}/vendor/products`, label: t("vendor.nav.products"), icon: Package },
     { href: `/${locale}/vendor/categories`, label: t("vendor.nav.categories"), icon: FolderTree },
-    { href: `/${locale}/vendor/coupons`, label: "Coupons", icon: ShoppingCart },
+    { href: `/${locale}/vendor/coupons`, label: t("vendor.couponsTitle"), icon: ShoppingCart },
     { href: `/${locale}/vendor/payouts`, label: t("vendor.nav.payouts"), icon: BarChart3 },
     { href: `/${locale}/vendor/orders`, label: t("vendor.nav.orders"), icon: ShoppingCart },
     { href: `/${locale}/vendor/returns`, label: t("vendor.nav.returns"), icon: RotateCcw },
     { href: `/${locale}/vendor/inventory`, label: t("vendor.nav.inventory"), icon: Boxes },
     { href: `/${locale}/vendor/analytics`, label: t("vendor.nav.analytics"), icon: BarChart3 },
     { href: `/${locale}/vendor/notifications`, label: t("vendor.nav.notifications"), icon: Bell },
+    { href: `/${locale}/vendor/help`, label: t("support.navLabel"), icon: LifeBuoy },
     { href: `/${locale}/vendor/settings`, label: t("vendor.nav.settings"), icon: Settings },
   ];
 
   return (
     <div className="min-h-screen bg-[#f5f8f6] text-[#123b35] lg:flex">
       {open && <button type="button" aria-label={t("auth.closeMenu")} onClick={() => setOpen(false)} className="fixed inset-0 z-30 bg-[#123b35]/40 lg:hidden" />}
-      <aside className={`fixed inset-y-0 start-0 z-40 w-72 bg-[#123b35] p-5 text-white shadow-2xl transition-transform lg:static lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
+      <aside className={`fixed inset-y-0 start-0 z-40 h-dvh w-72 overflow-y-auto bg-[#123b35] p-5 text-white shadow-2xl transition-transform lg:sticky lg:top-0 lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
         <div className="border-b border-white/10 pb-6">
           <SomsuuqLogo locale={locale} inverse href={`/${locale}/vendor/dashboard`} subtitle={t("vendor.brandSubtitle")} />
           <div className="mt-5 flex min-w-0 items-center gap-3 rounded-xl bg-white/10 p-3">
@@ -91,12 +105,12 @@ export function VendorShell({ children, locale, email, storeName, logoFileId }: 
         <nav className="mt-6 grid gap-2" aria-label={t("vendor.nav.dashboard")}>
           {links.map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname.startsWith(`${href}/`);
-            return <Link key={href} href={href} onClick={() => setOpen(false)} className={`flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-semibold ${active ? "bg-[#f4b942] text-[#123b35]" : "text-white/75 hover:bg-white/10 hover:text-white"}`}><Icon className="size-5" aria-hidden="true" />{label}{href.endsWith("/notifications") && unread > 0 ? <span className="ms-auto rounded-full bg-[#f4b942] px-2 py-0.5 text-[10px] font-bold text-[#123b35]">{unread}</span> : null}</Link>;
+            return <Link key={href} href={href} onClick={() => setOpen(false)} className={`flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-semibold ${active ? "bg-[#f4b942] text-[#123b35]" : "text-white/75 hover:bg-white/10 hover:text-white"}`}><Icon className="size-5" aria-hidden="true" />{label}{href.endsWith("/notifications") && unreadMessages > 0 ? <span className="ms-auto rounded-full bg-[#f4b942] px-2 py-0.5 text-[10px] font-bold text-[#123b35]">{unreadMessages > 99 ? "99+" : unreadMessages}</span> : null}</Link>;
           })}
         </nav>
       </aside>
       <div className="min-w-0 flex-1">
-        <header className="sticky top-0 z-20 flex min-h-20 items-center justify-between gap-3 border-b border-[#e1e9e5] bg-white/95 px-4 shadow-sm backdrop-blur sm:px-8">
+        <header className="sticky top-0 z-20 flex min-h-20 items-center justify-between gap-2 border-b border-[#e1e9e5] bg-white/95 px-2 shadow-sm backdrop-blur sm:gap-3 sm:px-8">
           <button type="button" onClick={() => setOpen(true)} className="rounded-xl border border-[#d5dfda] p-2 lg:hidden" aria-label={t("auth.openMenu")}><Menu className="size-5" /></button>
           <div className="min-w-0">
             <p className="hidden text-xs font-medium text-slate-500 sm:block">{t("vendor.panelLabel")}</p>
@@ -107,6 +121,7 @@ export function VendorShell({ children, locale, email, storeName, logoFileId }: 
             <Search className="absolute start-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
             <input type="search" placeholder={t("vendor.searchPlaceholder")} className="min-h-10 w-full rounded-xl border border-[#dce4e1] bg-[#f8faf9] ps-9 pe-3 text-sm outline-none focus:border-[#123b35] focus:ring-2 focus:ring-[#123b35]/15" />
           </label>
+          <VendorNotificationBell />
           <LanguageSwitcher />
           <div className="relative">
             <button type="button" onClick={() => setProfileOpen((value) => !value)} className="flex items-center gap-2 rounded-xl p-1.5 hover:bg-[#f1f5f3]" aria-expanded={profileOpen}>

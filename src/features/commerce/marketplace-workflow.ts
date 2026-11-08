@@ -12,6 +12,11 @@ import {
   resolveCommissionPercent,
 } from "@/features/commerce/financial-calculations";
 import { recordPaidVendorOrderLedger } from "@/features/commerce/financial-service";
+import {
+  availableStockInTransaction,
+  expireReservations,
+  lockInventoryVariants,
+} from "@/features/commerce/inventory";
 
 const RESERVATION_MS = 10 * 60 * 1000;
 
@@ -21,29 +26,6 @@ function scopedIdempotencyKey(customerId: string, key: string) {
 
 export function money(value: Prisma.Decimal | string | number) {
   return new Prisma.Decimal(value).toFixed(2);
-}
-
-export async function expireReservations() {
-  await prisma.stockReservation.updateMany({
-    where: { status: "ACTIVE", expiresAt: { lt: new Date() } },
-    data: { status: "EXPIRED" },
-  });
-}
-
-export async function reservedQuantity(variantId: string, exceptReservationId?: string) {
-  await expireReservations();
-  const items = await prisma.stockReservationItem.findMany({
-    where: {
-      variantId,
-      reservation: { status: "ACTIVE", expiresAt: { gt: new Date() }, ...(exceptReservationId ? { id: { not: exceptReservationId } } : {}) },
-    },
-    select: { quantity: true },
-  });
-  return items.reduce((sum, item) => sum + item.quantity, 0);
-}
-
-export async function availableStock(variantId: string, physical: number, exceptReservationId?: string) {
-  return Math.max(0, physical - await reservedQuantity(variantId, exceptReservationId));
 }
 
 function applyDiscount(base: Prisma.Decimal, type: "PERCENTAGE" | "FIXED", value: Prisma.Decimal) {
@@ -65,7 +47,7 @@ function validateCouponInput(input: {
   minOrderAmount?: number;
   startsAt: string | Date;
   endsAt: string | Date;
-  totalUsageLimit?: number;
+  totalUsageLimit?: number | null;
   perCustomerLimit?: number;
 }) {
   const code = normalizeCouponCode(input.code);
@@ -86,7 +68,7 @@ function validateCouponInput(input: {
     throw new AppError("INVALID_COUPON_MINIMUM", 400, "The minimum order amount cannot be negative.");
   }
 
-  const totalUsageLimit = input.totalUsageLimit;
+  const totalUsageLimit = input.totalUsageLimit ?? undefined;
   if (totalUsageLimit !== undefined && (!Number.isInteger(totalUsageLimit) || totalUsageLimit <= 0)) {
     throw new AppError("INVALID_COUPON_LIMIT", 400, "Usage limits must be positive integers.");
   }
@@ -112,33 +94,41 @@ export async function startCheckoutReservation(user: AuthenticatedUser, guestKey
   await expireReservations();
   const cart = await prisma.shoppingCart.findFirst({
     where: user.accountType === "CUSTOMER" ? { userId: user.id } : { guestKey: guestKey ?? "" },
-    include: {
-      items: { include: { variant: { include: { product: { include: { vendor: { include: { vendorProfile: true, deliveryRule: true } }, images: { take: 1, orderBy: { isPrimary: "desc" } }, category: true } } } } } },
-    },
+    select: { id: true },
   });
-  if (!cart || cart.items.length === 0) throw new AppError("CART_EMPTY", 400, "Your cart is empty.");
-
-  const blocked = [];
-  for (const item of cart.items) {
-    const available = await availableStock(item.variantId, item.variant.stockQuantity);
-    if (!item.variant.isActive || item.variant.product.status !== "PUBLISHED" || available < item.quantity) {
-      blocked.push({ name: item.variant.product.name, variantName: item.variant.variantName, sku: item.variant.sku });
-    }
-  }
-  if (blocked.length) {
-    throw new AppError("RESERVATION_UNAVAILABLE", 409, `Cannot reserve: ${blocked.map((item) => `${item.name} (${item.variantName})`).join(", ")}.`);
-  }
-
-  const groupedCart = new Map<string, typeof cart.items>();
-  for (const item of cart.items) {
-    const vendorId = item.variant.product.vendor.id;
-    groupedCart.set(vendorId, [...(groupedCart.get(vendorId) ?? []), item]);
-  }
+  if (!cart) throw new AppError("CART_EMPTY", 400, "Your cart is empty.");
   return prisma.$transaction(async (tx) => {
-    await tx.stockReservation.updateMany({ where: { customerId: user.id, status: "ACTIVE" }, data: { status: "RELEASED" } });
+    await tx.$queryRaw`SELECT "id" FROM "shopping_carts" WHERE "id" = ${cart.id}::uuid FOR UPDATE`;
+    const currentCart = await tx.shoppingCart.findUnique({
+      where: { id: cart.id },
+      include: {
+        items: { include: { variant: { include: { product: { include: { vendor: { include: { vendorProfile: true, deliveryRule: true } }, images: { take: 1, orderBy: { isPrimary: "desc" } }, category: true } } } } } },
+      },
+    });
+    if (!currentCart || currentCart.items.length === 0) {
+      throw new AppError("CART_EMPTY", 400, "Your cart is empty.");
+    }
+
+    const activeReservations = await tx.stockReservation.findMany({
+      where: { customerId: user.id, status: "ACTIVE" },
+      select: { items: { select: { variantId: true } } },
+    });
+    const inventoryIds = [
+      ...currentCart.items.map((item) => item.variantId),
+      ...activeReservations.flatMap((reservation) => reservation.items.map((item) => item.variantId)),
+    ];
+    await lockInventoryVariants(tx, inventoryIds);
+    await tx.stockReservation.updateMany({
+      where: { customerId: user.id, status: "ACTIVE" },
+      data: { status: "RELEASED" },
+    });
+    const groupedCart = new Map<string, typeof currentCart.items>();
+    for (const item of currentCart.items) {
+      const vendorId = item.variant.product.vendor.id;
+      groupedCart.set(vendorId, [...(groupedCart.get(vendorId) ?? []), item]);
+    }
     const prices = new Map<string, Prisma.Decimal>();
-    for (const item of cart.items) {
-      await tx.$queryRaw`SELECT id FROM product_variants WHERE id = ${item.variantId}::uuid FOR UPDATE`;
+    for (const item of currentCart.items) {
       const variant = await tx.productVariant.findUniqueOrThrow({
         where: { id: item.variantId },
         include: { product: { select: { status: true } } },
@@ -146,13 +136,20 @@ export async function startCheckoutReservation(user: AuthenticatedUser, guestKey
       if (!variant.isActive || variant.product.status !== "PUBLISHED") {
         throw new AppError("RESERVATION_UNAVAILABLE", 409, `${item.variant.product.name} is no longer available.`);
       }
-      const held = await tx.stockReservationItem.aggregate({
-        where: { variantId: item.variantId, reservation: { status: "ACTIVE", expiresAt: { gt: new Date() } } },
-        _sum: { quantity: true },
-      });
-      const available = variant.stockQuantity - (held._sum.quantity ?? 0);
+      const available = await availableStockInTransaction(
+        tx,
+        item.variantId,
+        variant.stockQuantity,
+        { exceptCustomerId: user.id },
+      );
       if (available < item.quantity) {
-        throw new AppError("RESERVATION_CONFLICT", 409, `${item.variant.product.name} no longer has enough stock.`);
+        throw new AppError(
+          available === 0 ? "OUT_OF_STOCK" : "INSUFFICIENT_STOCK",
+          409,
+          available === 0
+            ? `${item.variant.product.name} is out of stock.`
+            : `${item.variant.product.name} has only ${available} units available.`,
+        );
       }
       prices.set(item.variantId, new Prisma.Decimal(variant.price));
     }
@@ -170,7 +167,7 @@ export async function startCheckoutReservation(user: AuthenticatedUser, guestKey
         customerId: user.id,
         expiresAt: new Date(Date.now() + RESERVATION_MS),
         items: {
-          create: cart.items.map((item) => ({
+          create: currentCart.items.map((item) => ({
             variantId: item.variantId,
             quantity: item.quantity,
             unitPrice: prices.get(item.variantId)!,
@@ -236,45 +233,58 @@ export async function quoteCheckoutReservation(
   user: AuthenticatedUser,
   input: { reservationId: string; platformCoupon?: string; vendorCoupons?: Record<string, string> },
 ) {
-  const reservation = await prisma.stockReservation.findFirst({
+  const reservationItems = await prisma.stockReservation.findFirst({
     where: { id: input.reservationId, customerId: user.id },
-    include: {
-      items: {
-        include: {
-          variant: {
-            include: {
-              product: { include: { vendor: { include: { vendorProfile: true, deliveryRule: true } } } },
+    select: { items: { select: { variantId: true } } },
+  });
+  if (!reservationItems) {
+    throw new AppError("RESERVATION_EXPIRED", 409, "The stock reservation has expired. Return to cart and try again.");
+  }
+  return prisma.$transaction(async (tx) => {
+    await lockInventoryVariants(tx, reservationItems.items.map((item) => item.variantId));
+    await tx.$queryRaw`SELECT "id" FROM "stock_reservations" WHERE "id" = ${input.reservationId}::uuid FOR UPDATE`;
+    const reservation = await tx.stockReservation.findFirst({
+      where: { id: input.reservationId, customerId: user.id },
+      include: {
+        items: {
+          include: {
+            variant: {
+              include: {
+                product: { include: { vendor: { include: { vendorProfile: true, deliveryRule: true } } } },
+              },
             },
           },
         },
       },
-    },
-  });
-  if (!reservation || reservation.status !== "ACTIVE" || reservation.expiresAt <= new Date()) {
-    throw new AppError("RESERVATION_EXPIRED", 409, "The stock reservation has expired. Return to cart and try again.");
-  }
-  return prisma.$transaction(async (tx) => {
+    });
+    if (!reservation || reservation.status !== "ACTIVE" || reservation.expiresAt <= new Date()) {
+      throw new AppError("RESERVATION_EXPIRED", 409, "The stock reservation has expired. Return to cart and try again.");
+    }
+    for (const item of reservation.items) {
+      const available = await availableStockInTransaction(
+        tx,
+        item.variantId,
+        item.variant.stockQuantity,
+        { exceptReservationId: reservation.id },
+      );
+      if (available < item.quantity) {
+        throw new AppError("INSUFFICIENT_STOCK", 409, `${item.variant.product.name} no longer has enough stock.`);
+      }
+    }
     const grouped = new Map<string, typeof reservation.items>();
     for (const item of reservation.items) {
       const vendorId = item.variant.product.vendor.id;
       grouped.set(vendorId, [...(grouped.get(vendorId) ?? []), item]);
     }
-    let merchandise = new Prisma.Decimal(0);
-    let deliveryTotal = new Prisma.Decimal(0);
-    let discountTotal = new Prisma.Decimal(0);
+    const couponGroups: CouponGroupPricing[] = [];
     for (const [vendorId, items] of grouped.entries()) {
       const subtotal = items.reduce((sum, item) => sum.add(new Prisma.Decimal(item.unitPrice).mul(item.quantity)), new Prisma.Decimal(0));
-      merchandise = merchandise.add(subtotal);
       const first = items[0];
-      deliveryTotal = deliveryTotal.add(first?.variant.product.vendor.deliveryRule?.fee ?? first?.variant.product.vendor.vendorProfile?.deliveryFee ?? 0);
-      const vendorCoupon = input.vendorCoupons?.[vendorId];
-      if (vendorCoupon) discountTotal = discountTotal.add(await consumeCoupon(tx, user.id, vendorCoupon, "VENDOR", vendorId, subtotal));
+      const deliveryFee = first?.variant.product.vendor.deliveryRule?.fee ?? first?.variant.product.vendor.vendorProfile?.deliveryFee ?? 0;
+      couponGroups.push({ vendorId, merchandise: subtotal, delivery: new Prisma.Decimal(deliveryFee) });
     }
-    if (input.platformCoupon) {
-      discountTotal = discountTotal.add(await consumeCoupon(tx, user.id, input.platformCoupon, "PLATFORM", null, merchandise));
-    }
-    const total = merchandise.add(deliveryTotal).sub(discountTotal);
-    return { total: money(total), currency: "USD" };
+    const pricing = await calculateCheckoutPricing(tx, user.id, couponGroups, input.platformCoupon, input.vendorCoupons);
+    return { total: money(pricing.total), currency: "USD" };
   });
 }
 
@@ -554,7 +564,13 @@ export async function paySimulatedMobileMoney(user: AuthenticatedUser, guestKey:
     }
   }
   const idempotencyKey = scopedIdempotencyKey(user.id, input.idempotencyKey);
+  const reservationStock = await prisma.stockReservation.findFirst({
+    where: { id: input.reservationId, customerId: user.id },
+    select: { items: { select: { variantId: true } } },
+  });
+  if (!reservationStock) throw new AppError("RESERVATION_NOT_FOUND", 404, "Checkout reservation was not found.");
   const result = await prisma.$transaction(async (tx) => {
+    await lockInventoryVariants(tx, reservationStock.items.map((item) => item.variantId));
     await tx.$queryRaw`SELECT "id" FROM "stock_reservations" WHERE "id" = ${input.reservationId}::uuid FOR UPDATE`;
     const paymentAttempts = tx.simulatedPaymentAttempt;
     if (!paymentAttempts || typeof paymentAttempts.findFirst !== "function") {
@@ -630,6 +646,18 @@ export async function paySimulatedMobileMoney(user: AuthenticatedUser, guestKey:
       return { attempt, order: null, receipt: null };
     }
 
+    for (const item of reservation.items) {
+      const available = await availableStockInTransaction(
+        tx,
+        item.variantId,
+        item.variant.stockQuantity,
+        { exceptReservationId: reservation.id },
+      );
+      if (available < item.quantity) {
+        throw new AppError("INSUFFICIENT_STOCK", 409, `${item.variant.product.name} no longer has enough stock.`);
+      }
+    }
+
     const cart = await tx.shoppingCart.findFirst({ where: { userId: user.id }, include: { items: true } });
     const grouped = new Map<string, typeof reservation.items>();
     for (const item of reservation.items) {
@@ -637,26 +665,18 @@ export async function paySimulatedMobileMoney(user: AuthenticatedUser, guestKey:
       grouped.set(vendorId, [...(grouped.get(vendorId) ?? []), item]);
     }
 
-    let merchandise = new Prisma.Decimal(0);
-    let deliveryTotal = new Prisma.Decimal(0);
-    const vendorDiscounts = new Map<string, Prisma.Decimal>();
-    for (const [vendorId, items] of grouped) {
+    const couponGroups: CouponGroupPricing[] = [...grouped].map(([vendorId, items]) => {
       const subtotal = items.reduce((sum, item) => sum.add(new Prisma.Decimal(item.unitPrice).mul(item.quantity)), new Prisma.Decimal(0));
-      merchandise = merchandise.add(subtotal);
-      const fee = items[0]?.variant.product.vendor.deliveryRule?.fee ?? items[0]?.variant.product.vendor.vendorProfile?.deliveryFee ?? 0;
-      deliveryTotal = deliveryTotal.add(fee);
-      const code = input.vendorCoupons?.[vendorId];
-      if (code) {
-        vendorDiscounts.set(vendorId, await consumeCoupon(tx, user.id, code, "VENDOR", vendorId, subtotal));
-      }
-    }
-    const platformDiscount = input.platformCoupon
-      ? await consumeCoupon(tx, user.id, input.platformCoupon, "PLATFORM", null, merchandise)
-      : new Prisma.Decimal(0);
-    const total = merchandise
-      .add(deliveryTotal)
-      .sub(platformDiscount)
-      .sub([...vendorDiscounts.values()].reduce((sum, value) => sum.add(value), new Prisma.Decimal(0)));
+      const delivery = items[0]?.variant.product.vendor.deliveryRule?.fee ?? items[0]?.variant.product.vendor.vendorProfile?.deliveryFee ?? 0;
+      return { vendorId, merchandise: subtotal, delivery: new Prisma.Decimal(delivery) };
+    });
+    const { merchandise, deliveryTotal, vendorDiscounts, platformDiscount, total } = await calculateCheckoutPricing(
+      tx,
+      user.id,
+      couponGroups,
+      input.platformCoupon,
+      input.vendorCoupons,
+    );
     if (total.lte(0)) throw new AppError("INVALID_PAYMENT_AMOUNT", 409, "The calculated order total is invalid.");
 
     const pendingAttempt = await paymentAttempts.create({
@@ -961,7 +981,57 @@ async function consumeCoupon(
   return applyDiscount(base, coupon.discountType, coupon.discountValue);
 }
 
-async function finalizeCoupon(
+type CouponGroupPricing = {
+  vendorId: string;
+  merchandise: Prisma.Decimal;
+  delivery: Prisma.Decimal;
+};
+
+async function calculateCheckoutPricing(
+  tx: Prisma.TransactionClient,
+  customerId: string,
+  groups: CouponGroupPricing[],
+  platformCoupon?: string,
+  vendorCoupons?: Record<string, string>,
+) {
+  let merchandise = new Prisma.Decimal(0);
+  let deliveryTotal = new Prisma.Decimal(0);
+  const vendorDiscounts = new Map<string, Prisma.Decimal>();
+  for (const group of groups) {
+    merchandise = merchandise.add(group.merchandise);
+    deliveryTotal = deliveryTotal.add(group.delivery);
+    const code = vendorCoupons?.[group.vendorId];
+    if (code) {
+      vendorDiscounts.set(
+        group.vendorId,
+        await consumeCoupon(tx, customerId, code, "VENDOR", group.vendorId, group.merchandise),
+      );
+    }
+  }
+  const vendorDiscountTotal = [...vendorDiscounts.values()].reduce(
+    (sum, amount) => sum.add(amount),
+    new Prisma.Decimal(0),
+  );
+  const platformDiscount = platformCoupon
+    ? await consumeCoupon(
+      tx,
+      customerId,
+      platformCoupon,
+      "PLATFORM",
+      null,
+      merchandise.sub(vendorDiscountTotal),
+    )
+    : new Prisma.Decimal(0);
+  return {
+    merchandise,
+    deliveryTotal,
+    vendorDiscounts,
+    platformDiscount,
+    total: merchandise.add(deliveryTotal).sub(vendorDiscountTotal).sub(platformDiscount),
+  };
+}
+
+export async function finalizeCoupon(
   tx: Prisma.TransactionClient,
   customerId: string,
   orderId: string,
@@ -1353,7 +1423,7 @@ export async function upsertCoupon(actor: AuthenticatedUser, input: {
   minOrderAmount?: number;
   startsAt: string;
   endsAt: string;
-  totalUsageLimit?: number;
+  totalUsageLimit?: number | null;
   perCustomerLimit?: number;
   isActive?: boolean;
 }) {
@@ -1378,7 +1448,7 @@ export async function upsertCoupon(actor: AuthenticatedUser, input: {
       minOrderAmount: input.minOrderAmount ?? 0,
       startsAt: new Date(input.startsAt),
       endsAt: new Date(input.endsAt),
-      totalUsageLimit: input.totalUsageLimit,
+      totalUsageLimit: input.totalUsageLimit ?? null,
       perCustomerLimit: input.perCustomerLimit ?? 1,
       isActive: input.isActive ?? true,
     },
@@ -1391,7 +1461,7 @@ export async function upsertCoupon(actor: AuthenticatedUser, input: {
       minOrderAmount: input.minOrderAmount ?? 0,
       startsAt: new Date(input.startsAt),
       endsAt: new Date(input.endsAt),
-      totalUsageLimit: input.totalUsageLimit,
+      totalUsageLimit: input.totalUsageLimit ?? null,
       perCustomerLimit: input.perCustomerLimit ?? 1,
       isActive: input.isActive ?? true,
     },
@@ -1403,6 +1473,7 @@ const activeReturnStatuses = [
   "VENDOR_APPROVED",
   "RETURN_SHIPPED",
   "ESCALATED",
+  "IN_REVIEW",
   "ADMIN_APPROVED",
   "RETURNED",
   "RECEIVED",
@@ -1525,6 +1596,7 @@ export async function listCustomerReturns(user: AuthenticatedUser) {
       orderLine: { select: { id: true, productName: true, productNameSo: true, variantName: true, unitPrice: true, quantity: true } },
       vendor: { select: { vendorProfile: { select: { storeName: true } } } },
       refund: true,
+      disputeUpdates: { where: { audience: { in: ["BOTH", "CUSTOMER"] } }, orderBy: { createdAt: "asc" } },
     },
     orderBy: { createdAt: "desc" },
   });
@@ -1547,6 +1619,7 @@ export async function listVendorReturns(user: AuthenticatedUser) {
         },
       },
       refund: true,
+      disputeUpdates: { where: { audience: { in: ["BOTH", "VENDOR"] } }, orderBy: { createdAt: "asc" } },
     },
     orderBy: { createdAt: "desc" },
     take: 200,
@@ -1573,6 +1646,7 @@ export async function listAdminReturns(status?: string) {
         },
       },
       refund: true,
+      disputeUpdates: { orderBy: { createdAt: "asc" } },
     },
     orderBy: { createdAt: "desc" },
     take: 300,
@@ -1597,7 +1671,20 @@ export async function getReturnPhoto(user: AuthenticatedUser, returnId: string) 
   return request.photoKey;
 }
 
-type ReturnAction = "APPROVE" | "REJECT" | "ESCALATE" | "RETURN_SHIPPED" | "RECEIVE" | "ADMIN_APPROVE" | "ADMIN_REJECT";
+type ReturnAction =
+  | "APPROVE"
+  | "REJECT"
+  | "ESCALATE"
+  | "RETURN_SHIPPED"
+  | "RECEIVE"
+  | "ADMIN_APPROVE"
+  | "ADMIN_REJECT"
+  | "ADMIN_START_REVIEW"
+  | "ADMIN_UPHOLD"
+  | "ADMIN_OVERTURN"
+  | "ADMIN_REQUEST_INFO"
+  | "ADMIN_MESSAGE"
+  | "DISPUTE_MESSAGE";
 
 export async function reviewReturn(
   user: AuthenticatedUser,
@@ -1605,11 +1692,32 @@ export async function reviewReturn(
   action: ReturnAction,
   note?: string,
   instructions?: string,
+  target?: "CUSTOMER" | "VENDOR" | "BOTH",
 ) {
   const normalizedNote = note?.trim();
   const normalizedInstructions = instructions?.trim();
-  if ((action === "REJECT" || action === "ADMIN_APPROVE" || action === "ADMIN_REJECT") && !normalizedNote) {
+  const reasonRequired = new Set<ReturnAction>([
+    "REJECT",
+    "ADMIN_APPROVE",
+    "ADMIN_REJECT",
+    "ADMIN_START_REVIEW",
+    "ADMIN_UPHOLD",
+    "ADMIN_OVERTURN",
+    "ADMIN_REQUEST_INFO",
+    "ADMIN_MESSAGE",
+    "DISPUTE_MESSAGE",
+  ]);
+  if (reasonRequired.has(action) && !normalizedNote) {
     throw new AppError("RETURN_DECISION_REASON_REQUIRED", 400, "A decision explanation is required.");
+  }
+  if (action === "ADMIN_OVERTURN" && !normalizedInstructions) {
+    throw new AppError("RETURN_INSTRUCTIONS_REQUIRED", 400, "Return instructions are required to authorize a return.");
+  }
+  if (action === "ADMIN_APPROVE" && !normalizedInstructions) {
+    throw new AppError("RETURN_INSTRUCTIONS_REQUIRED", 400, "Return instructions are required to authorize a return.");
+  }
+  if ((action === "ADMIN_REQUEST_INFO" || action === "ADMIN_MESSAGE") && !target) {
+    throw new AppError("RETURN_INFO_TARGET_REQUIRED", 400, "Select who must provide more information.");
   }
   try {
     return await prisma.$transaction(async (tx) => {
@@ -1645,9 +1753,13 @@ export async function reviewReturn(
       if (user.accountType !== "CUSTOMER" || request.customerId !== user.id || request.status !== "VENDOR_REJECTED") {
         throw new AppError("FORBIDDEN", 403, "This return cannot be escalated.");
       }
-      const updated = await tx.returnRequest.update({
-        where: { id: returnId },
+      const changed = await tx.returnRequest.updateMany({
+        where: { id: returnId, status: "VENDOR_REJECTED" },
         data: { status: "ESCALATED", escalatedAt: now },
+      });
+      if (changed.count !== 1) throw new AppError("RETURN_CONCURRENT_CHANGE", 409, "This return dispute has already been escalated.");
+      await tx.returnDisputeUpdate.create({
+        data: { returnRequestId: returnId, authorRole: "CUSTOMER", audience: "BOTH", kind: "CUSTOMER_APPEAL", content: request.explanation || request.vendorNote || "The customer appealed the vendor decision." },
       });
       await tx.adminNotification.create({
         data: {
@@ -1673,20 +1785,30 @@ export async function reviewReturn(
           href: `/customer/orders/${request.orderId}`,
         },
       });
-      return updated;
+      return { ...request, status: "ESCALATED", escalatedAt: now };
     }
 
     if (action === "APPROVE" || action === "REJECT") {
       if (user.accountType !== "VENDOR" || request.vendorId !== user.id) throw new AppError("FORBIDDEN", 403, "Vendors can only review their own returns.");
       if (request.status !== "REQUESTED") throw new AppError("INVALID_RETURN_STATE", 409, "This return has already been reviewed.");
       const status = action === "APPROVE" ? "VENDOR_APPROVED" : "VENDOR_REJECTED";
-      const updated = await tx.returnRequest.update({
-        where: { id: returnId },
+      const changed = await tx.returnRequest.updateMany({
+        where: { id: returnId, status: "REQUESTED" },
         data: {
           status,
           vendorNote: normalizedNote,
           returnInstructions: action === "APPROVE" ? normalizedInstructions : null,
           reviewedByVendorAt: now,
+        },
+      });
+      if (changed.count !== 1) throw new AppError("RETURN_CONCURRENT_CHANGE", 409, "This return was already reviewed.");
+      await tx.returnDisputeUpdate.create({
+        data: {
+          returnRequestId: returnId,
+          authorRole: "VENDOR",
+          audience: "BOTH",
+          kind: action === "APPROVE" ? "VENDOR_APPROVED" : "VENDOR_REJECTED",
+          content: normalizedNote || (action === "APPROVE" ? "The vendor approved the return." : "The vendor rejected the return."),
         },
       });
       await tx.customerNotification.create({
@@ -1719,57 +1841,176 @@ export async function reviewReturn(
           },
         });
       }
-      return updated;
+      return {
+        ...request,
+        status,
+        vendorNote: normalizedNote ?? null,
+        returnInstructions: action === "APPROVE" ? normalizedInstructions ?? null : null,
+        reviewedByVendorAt: now,
+      };
     }
 
-    if (action === "ADMIN_APPROVE" || action === "ADMIN_REJECT") {
+    if (action.startsWith("ADMIN_")) {
       if (user.accountType !== "ADMIN") throw new AppError("FORBIDDEN", 403, "Admin only.");
-      if (request.status !== "ESCALATED") throw new AppError("INVALID_RETURN_STATE", 409, "Only escalated returns can be decided here.");
-      const status = action === "ADMIN_APPROVE" ? "ADMIN_APPROVED" : "ADMIN_REJECTED";
-      const updated = await tx.returnRequest.update({
-        where: { id: returnId },
+      const currentStatus = request.status;
+      if (!["ESCALATED", "IN_REVIEW"].includes(currentStatus)) {
+        throw new AppError("INVALID_RETURN_STATE", 409, "Only open return disputes can be updated.");
+      }
+      if (action === "ADMIN_START_REVIEW" && currentStatus !== "ESCALATED") {
+        throw new AppError("INVALID_RETURN_STATE", 409, "This dispute is already under review.");
+      }
+
+      const effectiveAction = action === "ADMIN_APPROVE"
+        ? "ADMIN_OVERTURN"
+        : action === "ADMIN_REJECT"
+          ? "ADMIN_UPHOLD"
+          : action;
+      const status = effectiveAction === "ADMIN_START_REVIEW" || effectiveAction === "ADMIN_REQUEST_INFO"
+        ? "IN_REVIEW"
+        : effectiveAction === "ADMIN_UPHOLD"
+          ? "ADMIN_REJECTED"
+          : effectiveAction === "ADMIN_OVERTURN"
+            ? "ADMIN_APPROVED"
+            : currentStatus;
+      const disputeResolution = effectiveAction === "ADMIN_UPHOLD"
+        ? "RESOLVED_VENDOR_UPHELD"
+        : effectiveAction === "ADMIN_OVERTURN"
+          ? "RESOLVED_CUSTOMER_FAVORED"
+          : effectiveAction === "ADMIN_REQUEST_INFO"
+            ? "INFORMATION_REQUESTED"
+            : effectiveAction === "ADMIN_START_REVIEW"
+              ? null
+              : request.disputeResolution;
+      const transition = await tx.returnRequest.updateMany({
+        where: { id: returnId, status: currentStatus },
         data: {
           status,
-          adminNote: normalizedNote,
+          disputeResolution,
+          adminNote: ["ADMIN_UPHOLD", "ADMIN_OVERTURN"].includes(effectiveAction)
+            ? normalizedNote
+            : request.adminNote,
           reviewedByAdminAt: now,
           reviewedByAdminId: user.id,
-          ...(action === "ADMIN_APPROVE" && normalizedInstructions ? { returnInstructions: normalizedInstructions } : {}),
+          ...(effectiveAction === "ADMIN_OVERTURN" ? { returnInstructions: normalizedInstructions } : {}),
+        },
+      });
+      if (transition.count !== 1) {
+        throw new AppError("RETURN_CONCURRENT_CHANGE", 409, "This dispute changed while you were deciding it. Refresh and try again.");
+      }
+      const updateKind = effectiveAction === "ADMIN_START_REVIEW"
+        ? "REVIEW_STARTED"
+        : effectiveAction === "ADMIN_UPHOLD"
+          ? "VENDOR_DECISION_UPHELD"
+          : effectiveAction === "ADMIN_OVERTURN"
+            ? "VENDOR_DECISION_OVERTURNED"
+            : effectiveAction === "ADMIN_REQUEST_INFO"
+              ? "INFORMATION_REQUESTED"
+              : "ADMIN_MESSAGE";
+      await tx.returnDisputeUpdate.create({
+        data: {
+          returnRequestId: returnId,
+          authorRole: "ADMIN",
+          audience: effectiveAction === "ADMIN_REQUEST_INFO" || effectiveAction === "ADMIN_MESSAGE" ? target ?? "BOTH" : "BOTH",
+          kind: updateKind,
+          content: normalizedNote!,
+          requestedFrom: effectiveAction === "ADMIN_REQUEST_INFO" ? target : null,
         },
       });
       await tx.auditLog.create({
         data: {
           actorUserId: user.id,
-          action: status,
+          action: effectiveAction,
           entityType: "ReturnRequest",
           entityId: returnId,
-          metadata: { reason: normalizedNote, orderNumber },
+          metadata: { reason: normalizedNote, orderNumber, status, disputeResolution, target: target ?? null },
         },
       });
-      await tx.customerNotification.create({
+
+      if (effectiveAction === "ADMIN_START_REVIEW") {
+        await tx.customerNotification.create({
+          data: { customerId: request.customerId, title: "Somsuuq is reviewing your return dispute", titleSo: "Somsuuq ayaa dib u eegaya khilaafka celintaada", body: `The dispute for order ${orderNumber} is under review. ${normalizedNote}`, bodySo: `Khilaafka dalabka ${orderNumber} waa la eegayaa. ${normalizedNote}`, entityType: "ReturnRequest", entityId: returnId, href: `/customer/orders/${request.orderId}` },
+        });
+        await tx.vendorNotification.create({
+          data: { vendorId: request.vendorId, title: "Somsuuq is reviewing a return dispute", titleSo: "Somsuuq ayaa dib u eegaya khilaafka celinta", body: `The dispute for order ${orderNumber} is under review. ${normalizedNote}`, bodySo: `Khilaafka dalabka ${orderNumber} waa la eegayaa. ${normalizedNote}`, entityType: "ReturnRequest", entityId: returnId, href: "/vendor/returns" },
+        });
+      } else if (effectiveAction === "ADMIN_UPHOLD") {
+        await tx.customerNotification.create({
+          data: { customerId: request.customerId, title: "The vendor's return decision was upheld", titleSo: "Go'aanka iibiyaha waa la xaqiijiyey", body: `The return dispute for order ${orderNumber} is closed. ${normalizedNote}`, bodySo: `Khilaafka celinta dalabka ${orderNumber} waa la xiray. ${normalizedNote}`, entityType: "ReturnRequest", entityId: returnId, href: `/customer/orders/${request.orderId}` },
+        });
+        await tx.vendorNotification.create({
+          data: { vendorId: request.vendorId, title: "The return dispute was resolved in your favor", titleSo: "Khilaafka celinta adiga ayaa ku guuleystay", body: `The vendor's decision for order ${orderNumber} was upheld. ${normalizedNote}`, bodySo: `Go'aankaaga dalabka ${orderNumber} waa la xaqiijiyey. ${normalizedNote}`, entityType: "ReturnRequest", entityId: returnId, href: "/vendor/returns" },
+        });
+      } else if (effectiveAction === "ADMIN_OVERTURN") {
+        await tx.customerNotification.create({
+          data: { customerId: request.customerId, title: "Your return is authorized", titleSo: "Celintaada waa la oggolaaday", body: `The vendor's rejection for order ${orderNumber} was overturned. Return instructions: ${normalizedInstructions}. ${normalizedNote}`, bodySo: `Diidmada iibiyaha ee dalabka ${orderNumber} waa la beddelay. Tilmaamaha celinta: ${normalizedInstructions}. ${normalizedNote}`, entityType: "ReturnRequest", entityId: returnId, href: `/customer/orders/${request.orderId}` },
+        });
+        await tx.vendorNotification.create({
+          data: { vendorId: request.vendorId, title: "The vendor return rejection was overturned", titleSo: "Diidmada celinta waa la beddelay", body: `The return for order ${orderNumber} is authorized. Await the item and inspect it before confirming receipt. ${normalizedNote}`, bodySo: `Celinta dalabka ${orderNumber} waa la oggolaaday. Sug alaabta oo kormeer ka hor intaadan xaqiijin helitaanka. ${normalizedNote}`, entityType: "ReturnRequest", entityId: returnId, href: "/vendor/returns" },
+        });
+      } else if (effectiveAction === "ADMIN_REQUEST_INFO" || effectiveAction === "ADMIN_MESSAGE") {
+        if (target === "CUSTOMER" || target === "BOTH") {
+          await tx.customerNotification.create({
+            data: { customerId: request.customerId, title: "A Somsuuq administrator sent a dispute update", titleSo: "Maamule Somsuuq ayaa kuu soo diray xog khilaaf", body: normalizedNote!, bodySo: normalizedNote!, entityType: "ReturnRequest", entityId: returnId, href: `/customer/orders/${request.orderId}` },
+          });
+        }
+        if (target === "VENDOR" || target === "BOTH") {
+          await tx.vendorNotification.create({
+            data: { vendorId: request.vendorId, title: "A Somsuuq administrator sent a dispute update", titleSo: "Maamule Somsuuq ayaa soo diray xog khilaaf", body: normalizedNote!, bodySo: normalizedNote!, entityType: "ReturnRequest", entityId: returnId, href: "/vendor/returns" },
+          });
+        }
+      }
+      return {
+        ...request,
+        status,
+        disputeResolution,
+        adminNote: normalizedNote,
+        reviewedByAdminAt: now,
+        reviewedByAdminId: user.id,
+        ...(effectiveAction === "ADMIN_OVERTURN" ? { returnInstructions: normalizedInstructions } : {}),
+      };
+    }
+
+    if (action === "DISPUTE_MESSAGE") {
+      if (
+        (user.accountType !== "CUSTOMER" && user.accountType !== "VENDOR") ||
+        (user.accountType === "CUSTOMER" && request.customerId !== user.id) ||
+        (user.accountType === "VENDOR" && request.vendorId !== user.id)
+      ) {
+        throw new AppError("FORBIDDEN", 403, "Only the return participants can message on this dispute.");
+      }
+      if (!["ESCALATED", "IN_REVIEW"].includes(request.status)) {
+        throw new AppError("INVALID_RETURN_STATE", 409, "This dispute is no longer open for messages.");
+      }
+      const touch = await tx.returnRequest.updateMany({
+        where: { id: returnId, status: request.status },
+        data: { updatedAt: new Date() },
+      });
+      if (touch.count !== 1) throw new AppError("RETURN_CONCURRENT_CHANGE", 409, "This dispute changed while the message was being sent.");
+      await tx.returnDisputeUpdate.create({
+        data: { returnRequestId: returnId, authorRole: user.accountType, audience: "BOTH", kind: "MESSAGE", content: normalizedNote! },
+      });
+      await tx.adminNotification.create({
         data: {
-          customerId: request.customerId,
-          title: action === "ADMIN_APPROVE" ? "The return dispute was approved" : "The return dispute was rejected",
-          titleSo: action === "ADMIN_APPROVE" ? "Khilaafka celinta waa la oggolaaday" : "Khilaafka celinta waa la diiday",
-          body: `An administrator decided your return for order ${orderNumber}: ${normalizedNote}`,
-          bodySo: `Maamule ayaa go'aan ka gaaray celinta dalabka ${orderNumber}: ${normalizedNote}`,
+          type: "RETURN_DISPUTE_MESSAGE",
+          title: "A party replied to a return dispute",
+          titleSo: "Dhinac ayaa ka jawaabay khilaafka celinta",
+          body: `A ${user.accountType.toLowerCase()} sent a message for order ${orderNumber}.`,
+          bodySo: `Dhinac ayaa farriin u diray khilaafka dalabka ${orderNumber}.`,
           entityType: "ReturnRequest",
           entityId: returnId,
-          href: `/customer/orders/${request.orderId}`,
+          href: "/admin/returns",
         },
       });
-      await tx.vendorNotification.create({
-        data: {
-          vendorId: request.vendorId,
-          title: "An administrator resolved a return dispute",
-          titleSo: "Maamule ayaa xalliyey khilaafka celinta",
-          body: `An administrator decided the return for order ${orderNumber}: ${normalizedNote}`,
-          bodySo: `Maamule ayaa go'aan ka gaaray celinta dalabka ${orderNumber}: ${normalizedNote}`,
-          entityType: "ReturnRequest",
-          entityId: returnId,
-          href: "/vendor/returns",
-        },
-      });
-      return updated;
+      if (user.accountType === "CUSTOMER") {
+        await tx.vendorNotification.create({
+          data: { vendorId: request.vendorId, title: "A customer replied to a return dispute", titleSo: "Macmiil ayaa ka jawaabay khilaafka celinta", body: `A customer sent a message for order ${orderNumber}.`, bodySo: `Macmiil ayaa farriin u diray khilaafka dalabka ${orderNumber}.`, entityType: "ReturnRequest", entityId: returnId, href: "/vendor/returns" },
+        });
+      } else {
+        await tx.customerNotification.create({
+          data: { customerId: request.customerId, title: "The vendor replied to a return dispute", titleSo: "Iibiyaha ayaa ka jawaabay khilaafka celinta", body: `The vendor sent a message for order ${orderNumber}.`, bodySo: `Iibiyaha ayaa farriin u diray khilaafka dalabka ${orderNumber}.`, entityType: "ReturnRequest", entityId: returnId, href: `/customer/orders/${request.orderId}` },
+        });
+      }
+      return request;
     }
 
     if (action === "RETURN_SHIPPED") {
@@ -1837,9 +2078,16 @@ export async function reviewReturn(
       if (refundedAmount.add(amount).gt(capturedAmount)) {
         throw new AppError("REFUND_EXCEEDS_CAPTURED_PAYMENT", 409, "This refund would exceed the original captured payment.");
       }
-      await tx.returnRequest.update({
-        where: { id: returnId },
+      const received = await tx.returnRequest.updateMany({
+        where: { id: returnId, status: "RETURN_SHIPPED" },
         data: { status: "REFUND_PROCESSING", receivedAt: now },
+      });
+      if (received.count !== 1) {
+        throw new AppError("RETURN_CONCURRENT_CHANGE", 409, "This return was already received or changed. Refresh and try again.");
+      }
+      await tx.productVariant.update({
+        where: { id: request.orderLine.variantId },
+        data: { stockQuantity: { increment: request.quantity } },
       });
       await tx.simulatedRefund.create({
         data: {
@@ -1950,35 +2198,77 @@ export async function reviewReturn(
   }
 }
 
+export function parseMarketplaceAnalyticsDate(value: string | null, endOfDay = false) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new AppError("INVALID_ANALYTICS_DATE", 400, "The analytics date range is invalid.");
+  }
+  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    date.setUTCHours(23, 59, 59, 999);
+  }
+  return date;
+}
+
 export async function adminMarketplaceAnalytics(from?: Date, to?: Date) {
-  const where = { createdAt: { gte: from, lte: to } };
+  const createdAt = {
+    ...(from ? { gte: from } : {}),
+    ...(to ? { lte: to } : {}),
+  };
+  const hasDateRange = Boolean(from || to);
+  const parentOrderDateFilter = hasDateRange ? { createdAt } : {};
   const orders = await prisma.marketplaceOrder.findMany({
-    where: { paymentStatus: "SUCCEEDED", status: { not: "CANCELLED" }, ...(from || to ? { createdAt: { gte: from, lte: to } } : {}) },
-    select: { createdAt: true, totalAmount: true, platformDiscount: true },
+    where: { paymentStatus: "SUCCEEDED", status: { not: "CANCELLED" }, ...(hasDateRange ? { createdAt } : {}) },
+    select: { createdAt: true, subtotalAmount: true },
   });
   const salesByDay = new Map<string, Prisma.Decimal>();
   for (const order of orders) {
     const day = order.createdAt.toISOString().slice(0, 10);
-    salesByDay.set(day, (salesByDay.get(day) ?? new Prisma.Decimal(0)).add(order.totalAmount));
+    salesByDay.set(day, (salesByDay.get(day) ?? new Prisma.Decimal(0)).add(order.subtotalAmount));
   }
-  const statuses = await prisma.vendorOrder.groupBy({ by: ["status"], _count: { _all: true } });
-  const commissions = await prisma.ledgerEntry.aggregate({ where: { type: "COMMISSION", ...(from || to ? where : {}) }, _sum: { amount: true } });
-  const refunds = await prisma.simulatedRefund.aggregate({ where: from || to ? { createdAt: { gte: from, lte: to } } : {}, _sum: { amount: true } });
-  const payouts = await prisma.vendorPayout.aggregate({ where: from || to ? { createdAt: { gte: from, lte: to } } : {}, _sum: { amount: true } });
-  const topVendors = await prisma.vendorOrder.groupBy({
-    by: ["vendorId"],
-    where: { status: { notIn: ["CANCELLED", "EXPIRED"] }, order: { paymentStatus: "SUCCEEDED" } },
-    _sum: { subtotalAmount: true },
-    orderBy: { _sum: { subtotalAmount: "desc" } },
-    take: 8,
+  const statuses = await prisma.vendorOrder.groupBy({
+    by: ["status"],
+    where: hasDateRange ? { order: parentOrderDateFilter } : {},
+    _count: { _all: true },
   });
+  const commissions = await prisma.ledgerEntry.aggregate({
+    where: { type: "COMMISSION", ...(hasDateRange ? { createdAt } : {}) },
+    _sum: { amount: true },
+  });
+  const refunds = await prisma.simulatedRefund.aggregate({
+    where: hasDateRange ? { createdAt } : {},
+    _sum: { amount: true },
+  });
+  const payouts = await prisma.vendorPayout.aggregate({
+    where: hasDateRange ? { createdAt } : {},
+    _sum: { amount: true },
+  });
+  const topVendorOrders = await prisma.vendorOrder.findMany({
+    where: {
+      status: { notIn: ["CANCELLED", "EXPIRED"] },
+      order: { paymentStatus: "SUCCEEDED", ...parentOrderDateFilter },
+    },
+    select: { vendorId: true, lines: { select: { unitPrice: true, quantity: true } } },
+  });
+  const vendorTotals = new Map<string, Prisma.Decimal>();
+  for (const order of topVendorOrders) {
+    const total = order.lines.reduce(
+      (sum, line) => sum.add(new Prisma.Decimal(line.unitPrice).mul(line.quantity)),
+      new Prisma.Decimal(0),
+    );
+    vendorTotals.set(order.vendorId, (vendorTotals.get(order.vendorId) ?? new Prisma.Decimal(0)).add(total));
+  }
+  const topVendors = [...vendorTotals.entries()]
+    .map(([vendorId, total]) => ({ vendorId, total }))
+    .sort((left, right) => right.total.sub(left.total).toNumber())
+    .slice(0, 8);
   return {
     salesByDay: [...salesByDay.entries()].map(([day, total]) => ({ day, total: money(total) })),
     orderStatuses: statuses.map((item) => ({ status: item.status, count: item._count._all })),
     commissionEarned: money((commissions._sum.amount ?? new Prisma.Decimal(0)).abs()),
     refundTotals: money(refunds._sum.amount ?? 0),
     payoutTotals: money(payouts._sum.amount ?? 0),
-    topVendors: topVendors.map((item) => ({ vendorId: item.vendorId, total: money(item._sum.subtotalAmount ?? 0) })),
+    topVendors: topVendors.map((item) => ({ vendorId: item.vendorId, total: money(item.total) })),
     simulated: true,
   };
 }

@@ -15,7 +15,7 @@ import { enforceRateLimit } from "@/features/auth/security";
 import { verifyRecaptchaToken } from "@/lib/recaptcha/server";
 import {
   getAdminOverview,
-  deleteAdminUser,
+  anonymizeAdminUser,
   listAdminAuditLogs,
   listAdminUsers,
   suspendAdminUser,
@@ -26,6 +26,8 @@ import {
   removeCustomerProfilePhoto,
   updateCustomerProfile,
   updateCustomerProfilePhoto,
+  getPublicUserPhoto,
+  getPublicUserProfile,
 } from "@/features/customer/service";
 import {
   listAdminNotifications,
@@ -150,9 +152,9 @@ import {
 import { createCategory, updateCategory } from "@/features/products/service";
 import {
   adminMarketplaceAnalytics,
+  parseMarketplaceAnalyticsDate,
   cancelCheckoutReservation,
   createReview,
-  expireReservations,
   getCustomerPaymentReceipt,
   hideReview,
   getProductReviewPhoto,
@@ -175,6 +177,7 @@ import {
   startCheckoutReservation,
   upsertCoupon,
 } from "@/features/commerce/marketplace-workflow";
+import { expireReservations } from "@/features/commerce/inventory";
 import {
   approvePayoutBatch,
   cancelPayoutBatch,
@@ -188,6 +191,22 @@ import {
   updateCategoryCommission,
   updateDefaultCommission,
 } from "@/features/commerce/financial-service";
+import {
+  addSupportAttachment,
+  addSupportMessage,
+  createSupportTicket,
+  getSupportAttachment,
+  getSupportContext,
+  getSupportTicket,
+  getSupportTicketAIContext,
+  listAdminSupportTickets,
+  listSupportTickets,
+  retrySupportEmailDelivery,
+  updateAdminSupportTicket,
+} from "@/features/support/service";
+import { requestAbuurAI } from "@/features/ai/abuur-ai-service";
+import { getAbuurAIConfig } from "@/config/env";
+import { createSupportTranscript, sanitizeSupportAIText } from "@/features/support/ai-context";
 
 type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 type OpenApiMethod = "get" | "post" | "patch" | "delete";
@@ -368,7 +387,7 @@ const reviewModerationQuerySchema = z.object({
   to: z.iso.datetime().optional(),
 }).strict();
 const adminReturnsQuerySchema = z.object({
-  status: z.enum(["REQUESTED", "VENDOR_APPROVED", "VENDOR_REJECTED", "RETURN_SHIPPED", "ESCALATED", "ADMIN_APPROVED", "ADMIN_REJECTED", "RETURNED", "RECEIVED", "REFUND_PROCESSING", "REFUNDED"]).optional(),
+  status: z.enum(["REQUESTED", "VENDOR_APPROVED", "VENDOR_REJECTED", "RETURN_SHIPPED", "ESCALATED", "IN_REVIEW", "ADMIN_APPROVED", "ADMIN_REJECTED", "RETURNED", "RECEIVED", "REFUND_PROCESSING", "REFUNDED"]).optional(),
 }).strict();
 const couponSchema = z.object({
   code: z.string().trim().min(3).max(40),
@@ -378,7 +397,7 @@ const couponSchema = z.object({
   minOrderAmount: z.coerce.number().min(0).optional(),
   startsAt: z.string(),
   endsAt: z.string(),
-  totalUsageLimit: z.coerce.number().int().positive().optional(),
+  totalUsageLimit: z.union([z.literal(null), z.coerce.number().int().positive()]).optional(),
   perCustomerLimit: z.coerce.number().int().positive().optional(),
   isActive: z.boolean().optional(),
 }).strict().superRefine((value, ctx) => {
@@ -430,9 +449,10 @@ const returnSchema = z.object({
   quantity: z.coerce.number().int().min(1).max(99).default(1),
 }).strict();
 const returnActionSchema = z.object({
-  action: z.enum(["APPROVE", "REJECT", "ESCALATE", "RETURN_SHIPPED", "RECEIVE", "ADMIN_APPROVE", "ADMIN_REJECT"]),
+  action: z.enum(["APPROVE", "REJECT", "ESCALATE", "RETURN_SHIPPED", "RECEIVE", "ADMIN_APPROVE", "ADMIN_REJECT", "ADMIN_START_REVIEW", "ADMIN_UPHOLD", "ADMIN_OVERTURN", "ADMIN_REQUEST_INFO", "ADMIN_MESSAGE", "DISPUTE_MESSAGE"]),
   note: z.string().trim().max(1000).optional(),
   instructions: z.string().trim().max(1000).optional(),
+  target: z.enum(["CUSTOMER", "VENDOR", "BOTH"]).optional(),
 }).strict();
 const categoryWriteSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -444,6 +464,76 @@ const categoryWriteSchema = z.object({
   isActive: z.boolean().optional(),
 }).strict();
 const categoryPatchSchema = categoryWriteSchema.partial();
+const supportCategorySchema = z.enum([
+  "ORDERS",
+  "PAYMENTS",
+  "DELIVERY",
+  "RETURNS",
+  "REFUNDS",
+  "ACCOUNT",
+  "PRODUCT_ISSUES",
+  "SAFETY",
+  "VENDOR_APPLICATION",
+  "STORE_PROFILE",
+  "PRODUCT_LISTING",
+  "INVENTORY",
+  "COUPONS",
+  "COMMISSION_PAYOUTS",
+  "ACCOUNT_SECURITY",
+  "OTHER",
+]);
+const supportStatusSchema = z.enum([
+  "OPEN",
+  "IN_PROGRESS",
+  "WAITING_FOR_CUSTOMER",
+  "WAITING_FOR_VENDOR",
+  "RESOLVED",
+  "CLOSED",
+]);
+const supportPrioritySchema = z.enum(["LOW", "NORMAL", "HIGH", "URGENT"]);
+const supportCreateSchema = z.object({
+  subject: z.string().trim().min(4).max(200),
+  description: z.string().trim().min(10).max(4000),
+  category: supportCategorySchema,
+  locale: z.enum(["en", "so"]).default("en"),
+  relatedOrderId: z.uuid().optional(),
+  vendorProfileId: z.uuid().optional(),
+  productId: z.uuid().optional(),
+}).strict();
+const supportMessageSchema = z.object({
+  content: z.string().trim().min(2).max(4000),
+}).strict();
+const adminSupportMessageSchema = supportMessageSchema.extend({
+  internalNote: z.boolean().default(false),
+}).strict();
+const supportAIRequestSchema = z.object({
+  question: z.string().trim().min(2).max(2000),
+  locale: z.enum(["en", "so"]),
+  ticketId: z.uuid().optional(),
+}).strict();
+const adminSupportAISchema = z.object({
+  action: z.enum(["SUMMARY", "DRAFT_REPLY", "TRIAGE"]),
+  locale: z.enum(["en", "so"]),
+}).strict();
+const adminSupportUpdateSchema = z.object({
+  status: supportStatusSchema.optional(),
+  priority: supportPrioritySchema.optional(),
+  assignedToId: z.uuid().nullable().optional(),
+}).strict().refine(
+  (value) =>
+    value.status !== undefined ||
+    value.priority !== undefined ||
+    value.assignedToId !== undefined,
+  "At least one support ticket field must be provided.",
+);
+const adminSupportQuerySchema = z.object({
+  search: z.string().trim().max(120).optional(),
+  requesterRole: z.enum(["CUSTOMER", "VENDOR"]).optional(),
+  status: supportStatusSchema.optional(),
+  priority: supportPrioritySchema.optional(),
+  page: z.coerce.number().int().min(1).max(10_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+});
 
 function envelope<T extends z.ZodType>(schema: T) {
   return z.object({ data: schema });
@@ -583,7 +673,425 @@ async function requireRole(
   return user;
 }
 
+async function requireSupportRequester(request: Request) {
+  const user = await requireUser(request, ["CUSTOMER", "VENDOR"]);
+  if (user.accountType !== "CUSTOMER" && user.accountType !== "VENDOR") {
+    throw new AppError("FORBIDDEN", 403, "Support access is not available.");
+  }
+  if (
+    !user.emailVerifiedAt &&
+    !user.hasAmazonIdentity
+  ) {
+    throw new AppError("EMAIL_NOT_VERIFIED", 403, "Verify your email address to continue.");
+  }
+  return user;
+}
+
+async function requireSupportParticipant(request: Request) {
+  const user = await requireUser(request);
+  if (
+    user.accountType !== "ADMIN" &&
+    !user.emailVerifiedAt &&
+    !user.hasAmazonIdentity
+  ) {
+    throw new AppError("EMAIL_NOT_VERIFIED", 403, "Verify your email address to continue.");
+  }
+  return user;
+}
+
+function supportIdempotencyKey(request: Request): string {
+  const key = request.headers.get("idempotency-key");
+  if (!key || key.length < 16 || key.length > 70 || !/^[A-Za-z0-9._:-]+$/.test(key)) {
+    throw new AppError(
+      "IDEMPOTENCY_KEY_REQUIRED",
+      400,
+      "A valid Idempotency-Key header is required.",
+    );
+  }
+  return key;
+}
+
+async function supportAttachmentForm(request: Request): Promise<File> {
+  assertSameOrigin(request);
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
+    throw new AppError("UNSUPPORTED_MEDIA_TYPE", 415, "Expected multipart form data.");
+  }
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (contentLength > 10 * 1024 * 1024 + 64 * 1024) {
+    throw new AppError("PAYLOAD_TOO_LARGE", 413, "The attachment is too large.");
+  }
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new AppError("INVALID_MULTIPART_BODY", 400, "The attachment form is invalid.");
+    }
+    throw error;
+  }
+  if ([...form.keys()].some((key) => key !== "file")) {
+    throw new AppError("INVALID_MULTIPART_BODY", 400, "The attachment form is invalid.");
+  }
+  const files = form.getAll("file");
+  if (files.length !== 1 || !(files[0] instanceof File)) {
+    throw new AppError("INVALID_FILE", 400, "Choose one attachment to upload.");
+  }
+  return files[0];
+}
+
 const routes: ApiRoute[] = [
+  route(
+    "GET",
+    "/support/availability",
+    ["Support"],
+    "Get authenticated support feature availability",
+    "Authenticated CUSTOMER or VENDOR",
+    success(
+      200,
+      "Support availability.",
+      envelope(z.object({ aiAvailable: z.boolean() })),
+    ),
+    async (request) => {
+      await requireSupportRequester(request);
+      return jsonResponse({ aiAvailable: getAbuurAIConfig().available });
+    },
+    { authenticated: true },
+  ),
+  route(
+    "GET",
+    "/support/context",
+    ["Support"],
+    "Get the requester's related marketplace records",
+    "Authenticated CUSTOMER or VENDOR",
+    success(200, "Support form context.", envelope(z.any())),
+    async (request) =>
+      jsonResponse(await getSupportContext(await requireSupportRequester(request))),
+    { authenticated: true },
+  ),
+  route(
+    "GET",
+    "/support/tickets",
+    ["Support"],
+    "List the authenticated requester's support tickets",
+    "Authenticated CUSTOMER or VENDOR; tickets are scoped to the requester",
+    success(200, "Support tickets.", envelope(z.any())),
+    async (request) => {
+      const user = await requireSupportRequester(request);
+      const paging = query(request, z.object({
+        page: z.coerce.number().int().min(1).max(10_000).default(1),
+        pageSize: z.coerce.number().int().min(1).max(50).default(20),
+      }));
+      return jsonResponse(
+        await listSupportTickets(user, paging.page, paging.pageSize),
+      );
+    },
+    { authenticated: true },
+  ),
+  route(
+    "POST",
+    "/support/tickets",
+    ["Support"],
+    "Create a support ticket",
+    "Authenticated CUSTOMER or VENDOR; requester's related marketplace records are verified",
+    success(201, "Support ticket created.", envelope(z.any())),
+    async (request) => {
+      const user = await requireSupportRequester(request);
+      await limit(request, "support-ticket-create", user.id, 5, 3600);
+      const idempotencyKey = supportIdempotencyKey(request);
+      const input = await body(request, supportCreateSchema);
+      return jsonResponse(
+        await createSupportTicket(user, { ...input, idempotencyKey }),
+        201,
+      );
+    },
+    { authenticated: true, requestBodySchema: supportCreateSchema },
+  ),
+  route(
+    "GET",
+    "/support/tickets/{ticketId}",
+    ["Support"],
+    "Get a support ticket and its public conversation",
+    "Authenticated CUSTOMER or VENDOR; own tickets only",
+    success(200, "Support ticket.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireSupportRequester(request);
+      return jsonResponse(
+        await getSupportTicket(user, uuidParam(params, "ticketId")),
+      );
+    },
+    {
+      authenticated: true,
+      pathSchema: z.object({ ticketId: z.uuid() }),
+    },
+  ),
+  route(
+    "POST",
+    "/support/tickets/{ticketId}/messages",
+    ["Support"],
+    "Add a public requester reply",
+    "Authenticated CUSTOMER or VENDOR; own open tickets only",
+    success(201, "Support message added.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireSupportRequester(request);
+      await limit(request, "support-message-create", user.id, 20, 60);
+      const input = await body(request, supportMessageSchema);
+      return jsonResponse(
+        await addSupportMessage(user, uuidParam(params, "ticketId"), {
+          ...input,
+          internalNote: false,
+          idempotencyKey: supportIdempotencyKey(request),
+        }),
+        201,
+      );
+    },
+    {
+      authenticated: true,
+      requestBodySchema: supportMessageSchema,
+      pathSchema: z.object({ ticketId: z.uuid() }),
+    },
+  ),
+  route(
+    "POST",
+    "/support/messages/{messageId}/attachments",
+    ["Support"],
+    "Upload a private support attachment",
+    "Authenticated ticket participant; sender may attach files to their own message",
+    success(201, "Support attachment uploaded.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireSupportParticipant(request);
+      await limit(request, "support-attachment-upload", user.id, 10, 600);
+      const idempotencyKey = supportIdempotencyKey(request);
+      const file = await supportAttachmentForm(request);
+      return jsonResponse(
+        await addSupportAttachment(
+          user,
+          uuidParam(params, "messageId"),
+          file,
+          idempotencyKey,
+        ),
+        201,
+      );
+    },
+    {
+      authenticated: true,
+      pathSchema: z.object({ messageId: z.uuid() }),
+    },
+  ),
+  route(
+    "GET",
+    "/support/attachments/{attachmentId}",
+    ["Support"],
+    "Download an authorized support attachment",
+    "Authenticated ticket participant; internal notes are support staff only",
+    success(200, "Private support attachment."),
+    async (request, params) => {
+      const user = await requireSupportParticipant(request);
+      const attachment = await getSupportAttachment(
+        user,
+        uuidParam(params, "attachmentId"),
+      );
+      const fallbackName = attachment.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\;]/g, "_");
+      return new Response(new Uint8Array(attachment.bytes), {
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Disposition": `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`,
+          "Content-Length": String(attachment.sizeBytes),
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+          "Content-Type": attachment.mimeType,
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    },
+    {
+      authenticated: true,
+      pathSchema: z.object({ attachmentId: z.uuid() }),
+    },
+  ),
+  route(
+    "POST",
+    "/support/ai",
+    ["Support"],
+    "Ask the optional support assistant",
+    "Authenticated CUSTOMER or VENDOR; ticket context is limited to the requester's own ticket status",
+    success(200, "Support assistant response.", envelope(z.any())),
+    async (request) => {
+      const user = await requireSupportRequester(request);
+      await limit(request, "support-ai", user.id, 5, 60);
+      const input = await body(request, supportAIRequestSchema);
+      const ticketContext = input.ticketId
+        ? await getSupportTicketAIContext(user, input.ticketId)
+        : null;
+      const prompt = [
+        ticketContext
+          ? `Verified ticket context: reference ${ticketContext.reference}; status ${ticketContext.status}; category ${ticketContext.category}; priority ${ticketContext.priority}.`
+          : "",
+        `User question: ${sanitizeSupportAIText(input.question).slice(0, 2000)}`,
+      ].filter(Boolean).join("\n");
+      const result = await requestAbuurAI({
+        text: prompt,
+        locale: input.locale,
+      });
+      return jsonResponse({
+        available: result.available,
+        answer: result.available ? result.text : null,
+      });
+    },
+    { authenticated: true, requestBodySchema: supportAIRequestSchema },
+  ),
+  route(
+    "GET",
+    "/admin/support/tickets",
+    ["Admin Support"],
+    "Search and filter support tickets",
+    "Authenticated ADMIN",
+    success(200, "Admin support ticket list.", envelope(z.any())),
+    async (request) => {
+      await requireRole(request, "ADMIN");
+      const filters = query(request, adminSupportQuerySchema);
+      return jsonResponse(await listAdminSupportTickets(filters));
+    },
+    { authenticated: true, querySchema: adminSupportQuerySchema },
+  ),
+  route(
+    "GET",
+    "/admin/support/tickets/{ticketId}",
+    ["Admin Support"],
+    "Get a support ticket including internal notes and activity",
+    "Authenticated ADMIN",
+    success(200, "Admin support ticket.", envelope(z.any())),
+    async (request, params) => {
+      const admin = await requireRole(request, "ADMIN");
+      return jsonResponse(
+        await getSupportTicket(admin, uuidParam(params, "ticketId")),
+      );
+    },
+    {
+      authenticated: true,
+      pathSchema: z.object({ ticketId: z.uuid() }),
+    },
+  ),
+  route(
+    "PATCH",
+    "/admin/support/tickets/{ticketId}",
+    ["Admin Support"],
+    "Update ticket assignment, status, or priority",
+    "Authenticated ADMIN",
+    success(200, "Support ticket updated.", envelope(z.any())),
+    async (request, params) => {
+      const admin = await requireRole(request, "ADMIN");
+      const input = await body(request, adminSupportUpdateSchema);
+      return jsonResponse(
+        await updateAdminSupportTicket({
+          actorId: admin.id,
+          ticketId: uuidParam(params, "ticketId"),
+          ...input,
+        }),
+      );
+    },
+    {
+      authenticated: true,
+      requestBodySchema: adminSupportUpdateSchema,
+      pathSchema: z.object({ ticketId: z.uuid() }),
+    },
+  ),
+  route(
+    "POST",
+    "/admin/support/tickets/{ticketId}/email-deliveries/{deliveryId}/retry",
+    ["Admin Support"],
+    "Retry a failed support notification email",
+    "Authenticated ADMIN",
+    success(200, "Support email delivery status.", envelope(z.any())),
+    async (request, params) => {
+      const admin = await requireRole(request, "ADMIN");
+      await limit(request, "support-email-retry", admin.id, 5, 3600);
+      return jsonResponse(
+        await retrySupportEmailDelivery(
+          uuidParam(params, "ticketId"),
+          uuidParam(params, "deliveryId"),
+        ),
+      );
+    },
+    {
+      authenticated: true,
+      pathSchema: z.object({ ticketId: z.uuid(), deliveryId: z.uuid() }),
+    },
+  ),
+  route(
+    "POST",
+    "/admin/support/tickets/{ticketId}/messages",
+    ["Admin Support"],
+    "Add a public support reply or private internal note",
+    "Authenticated ADMIN",
+    success(201, "Support message added.", envelope(z.any())),
+    async (request, params) => {
+      const admin = await requireRole(request, "ADMIN");
+      await limit(request, "support-admin-message", admin.id, 30, 60);
+      const input = await body(request, adminSupportMessageSchema);
+      return jsonResponse(
+        await addSupportMessage(admin, uuidParam(params, "ticketId"), {
+          ...input,
+          idempotencyKey: supportIdempotencyKey(request),
+        }),
+        201,
+      );
+    },
+    {
+      authenticated: true,
+      requestBodySchema: adminSupportMessageSchema,
+      pathSchema: z.object({ ticketId: z.uuid() }),
+    },
+  ),
+  route(
+    "POST",
+    "/admin/support/tickets/{ticketId}/ai",
+    ["Admin Support"],
+    "Generate an administrative ticket summary or suggestion",
+    "Authenticated ADMIN; AI output is advisory and does not change the ticket",
+    success(200, "Administrative support assistant response.", envelope(z.any())),
+    async (request, params) => {
+      const admin = await requireRole(request, "ADMIN");
+      await limit(request, "support-admin-ai", admin.id, 5, 60);
+      const input = await body(request, adminSupportAISchema);
+      const ticket = await getSupportTicket(
+        admin,
+        uuidParam(params, "ticketId"),
+      );
+      const transcript = createSupportTranscript(
+        ticket.messages,
+        input.action === "SUMMARY",
+      );
+      const publicTranscript = createSupportTranscript(ticket.messages, false);
+      const sharedContext = [
+        `Ticket ${ticket.reference}.`,
+        `Requester role: ${ticket.requesterRole}.`,
+        `Category: ${ticket.category}.`,
+        `Priority: ${ticket.priority}.`,
+        `Status: ${ticket.status}.`,
+        `Subject: ${sanitizeSupportAIText(ticket.subject).slice(0, 200)}.`,
+      ].join(" ");
+      const taskPrompt =
+        input.action === "SUMMARY"
+          ? `Summarize this support conversation for the assigned human support agent. Separate verified facts, open questions, and possible next steps. Do not claim actions were completed. Include internal notes only in this admin-only summary.\n${transcript}`
+          : input.action === "DRAFT_REPLY"
+            ? `Draft a concise, empathetic public reply for the support agent to review. Use only the public conversation, do not disclose internal notes, do not promise outcomes, and ask for missing details only when needed.\n${publicTranscript}`
+            : `Suggest (do not apply) one category from ORDERS, PAYMENTS, DELIVERY, RETURNS, REFUNDS, ACCOUNT, PRODUCT_ISSUES, SAFETY, VENDOR_APPLICATION, STORE_PROFILE, PRODUCT_LISTING, INVENTORY, COUPONS, COMMISSION_PAYOUTS, ACCOUNT_SECURITY, OTHER; one priority from LOW, NORMAL, HIGH, URGENT; and any missing information for the agent to request. Do not modify the ticket.\n${publicTranscript}`;
+      const result = await requestAbuurAI({
+        text: `${sharedContext}\n${taskPrompt}`,
+        locale: input.locale,
+        operation: input.action === "SUMMARY" ? "summarize" : "ask",
+      });
+      return jsonResponse({
+        available: result.available,
+        suggestion: result.available ? result.text : null,
+      });
+    },
+    {
+      authenticated: true,
+      requestBodySchema: adminSupportAISchema,
+      pathSchema: z.object({ ticketId: z.uuid() }),
+    },
+  ),
   route(
     "GET",
     "/categories",
@@ -1019,7 +1527,7 @@ const routes: ApiRoute[] = [
         input.recaptchaToken,
         `${input.accountType.toLowerCase()}_login`,
       );
-      return startAmazonLogin(input.accountType, locale);
+      return startAmazonLogin(input.accountType, locale, request);
     },
     {
       authenticated: false,
@@ -1435,15 +1943,15 @@ const routes: ApiRoute[] = [
     "DELETE",
     "/admin/users/{userId}",
     ["Admin"],
-    "Permanently delete a user account",
-    "Authenticated ADMIN; destructive; cannot delete the current administrator",
-    success(200, "User permanently deleted.", envelope(z.object({
+    "Anonymize a user account while retaining marketplace history",
+    "Authenticated ADMIN; removes account credentials and identifying profile data; cannot anonymize the current administrator",
+    success(200, "User identifying data erased; marketplace history retained.", envelope(z.object({
       userId: z.uuid(),
-      deleted: z.literal(true),
+      anonymized: z.literal(true),
     }))),
     async (request, params) => {
       assertSameOrigin(request);
-      return deleteAdminUser(
+      return anonymizeAdminUser(
         await requireRole(request, "ADMIN"),
         uuidParam(params, "userId"),
       ).then(jsonResponse);
@@ -1899,6 +2407,37 @@ const routes: ApiRoute[] = [
   ),
   route(
     "GET",
+    "/users/{userId}/photo",
+    ["Users"],
+    "Get a user's public profile photo",
+    "Public",
+    { responseStatus: 200, responseDescription: "User profile photo." },
+    async (_request, params) => {
+      const photo = await getPublicUserPhoto(uuidParam(params, "userId"));
+      return new Response(photo.bytes, {
+        headers: {
+          "Content-Type": photo.mimeType,
+          "Cache-Control": "public, max-age=3600",
+        },
+      });
+    },
+    { authenticated: false, pathSchema: z.object({ userId: z.uuid() }) },
+  ),
+  route(
+    "GET",
+    "/users/{userId}/profile",
+    ["Users"],
+    "Get a user's public profile",
+    "Public",
+    success(200, "User public profile.", envelope(z.object({ profile: z.any() }))),
+    async (_request, params) => {
+      const profile = await getPublicUserProfile(uuidParam(params, "userId"));
+      return jsonResponse({ profile });
+    },
+    { authenticated: false, pathSchema: z.object({ userId: z.uuid() }) },
+  ),
+  route(
+    "GET",
     "/customer/notifications",
     ["Customer"],
     "List customer notifications",
@@ -2210,14 +2749,16 @@ const routes: ApiRoute[] = [
       throw error;
     }
   }, { authenticated: true }),
-  route("POST", "/returns/{returnId}/action", ["Marketplace"], "Advance a return request", "Customer, vendor or admin", success(200, "Return updated.", envelope(z.any())), async (request, params) => {
+  route("POST", "/returns/{returnId}/action", ["Marketplace"], "Advance a return request or communicate about a dispute", "Customer, vendor or admin", success(200, "Return updated.", envelope(z.any())), async (request, params) => {
     const input = await body(request, returnActionSchema);
-    const user = input.action === "APPROVE" || input.action === "REJECT" || input.action === "RECEIVE"
+    const user = input.action.startsWith("ADMIN_")
+      ? await requireRole(request, "ADMIN")
+      : input.action === "APPROVE" || input.action === "REJECT" || input.action === "RECEIVE"
       ? await requireRole(request, "VENDOR", true)
-      : input.action === "ADMIN_APPROVE" || input.action === "ADMIN_REJECT"
-        ? await requireRole(request, "ADMIN")
+      : input.action === "DISPUTE_MESSAGE"
+        ? await requireUser(request, ["CUSTOMER", "VENDOR"])
         : await requireRole(request, "CUSTOMER");
-    return jsonResponse({ returnRequest: await reviewReturn(user, uuidParam(params, "returnId"), input.action, input.note, input.instructions) });
+    return jsonResponse({ returnRequest: await reviewReturn(user, uuidParam(params, "returnId"), input.action, input.note, input.instructions, input.target) });
   }, { authenticated: true, requestBodySchema: returnActionSchema, pathSchema: z.object({ returnId: z.uuid() }) }),
   route("GET", "/vendor/payouts", ["Vendor"], "View the authenticated vendor's financial statement and payouts", "Authenticated approved VENDOR", success(200, "Vendor financial statement.", envelope(z.any())), async (request) => {
     const user = await requireRole(request, "VENDOR", true);
@@ -2285,8 +2826,8 @@ const routes: ApiRoute[] = [
   route("GET", "/admin/marketplace-analytics", ["Admin"], "Marketplace financial analytics", "Authenticated ADMIN", success(200, "Analytics.", envelope(z.any())), async (request) => {
     await requireRole(request, "ADMIN");
     const params = new URL(request.url).searchParams;
-    const from = params.get("from") ? new Date(params.get("from")!) : undefined;
-    const to = params.get("to") ? new Date(params.get("to")!) : undefined;
+    const from = parseMarketplaceAnalyticsDate(params.get("from"));
+    const to = parseMarketplaceAnalyticsDate(params.get("to"), true);
     return jsonResponse(await adminMarketplaceAnalytics(from, to));
   }, { authenticated: true }),
   route("POST", "/vendor/delivery-fee", ["Vendor"], "Set vendor delivery fee", "Authenticated approved VENDOR", success(200, "Delivery fee saved.", envelope(z.any())), async (request) => jsonResponse({ rule: await setDeliveryFee(await requireRole(request, "VENDOR", true), (await body(request, z.object({ fee: z.coerce.number().min(0).max(9999) }).strict())).fee) }), { authenticated: true }),

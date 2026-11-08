@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { expireReservations } from "@/features/commerce/marketplace-workflow";
+import { expireReservations } from "@/features/commerce/inventory";
 import { expireStaleVendorOrders } from "@/features/commerce/service";
 import { createWeeklyPayoutBatch } from "@/features/commerce/financial-service";
 import { apiErrorResponse, apiSuccessResponse } from "@/lib/api/responses";

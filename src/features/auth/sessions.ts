@@ -274,6 +274,7 @@ export async function getOptionalCustomer(request: Request): Promise<Authenticat
 export async function requireUser(
   request: Request,
   allowedTypes?: readonly AccountType[],
+  options: { updateActivity?: boolean } = {},
 ): Promise<AuthenticatedUser> {
   const token = sessionToken(parseCookies(request.headers.get("cookie")).get(cookieName()));
   if (!token) {
@@ -347,12 +348,14 @@ export async function requireUser(
     throw new AppError("FORBIDDEN", 403, "You do not have permission to access this resource.");
   }
 
-  const activityUpdate = await prisma.userSession.updateMany({
-    where: { id: session.id, revokedAt: null, expiresAt: { gt: now } },
-    data: { lastActivityAt: now },
-  });
-  if (activityUpdate.count !== 1) {
-    throw new AppError("UNAUTHENTICATED", 401, "The session is invalid or expired.");
+  if (options.updateActivity !== false) {
+    const activityUpdate = await prisma.userSession.updateMany({
+      where: { id: session.id, revokedAt: null, expiresAt: { gt: now } },
+      data: { lastActivityAt: now },
+    });
+    if (activityUpdate.count !== 1) {
+      throw new AppError("UNAUTHENTICATED", 401, "The session is invalid or expired.");
+    }
   }
 
   return {

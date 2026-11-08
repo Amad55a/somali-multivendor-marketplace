@@ -6,6 +6,8 @@ vi.mock("@/lib/prisma", () => ({
     product: { findMany: vi.fn() },
     productReview: { groupBy: vi.fn() },
     orderLine: { findMany: vi.fn() },
+    stockReservation: { updateMany: vi.fn() },
+    stockReservationItem: { groupBy: vi.fn() },
   },
 }));
 vi.mock("@/features/vendors/service", () => ({ assertApprovedVendor: vi.fn() }));
@@ -17,6 +19,26 @@ import { prisma } from "@/lib/prisma";
 afterEach(() => vi.clearAllMocks());
 
 describe("public product catalog", () => {
+  it("reports available stock after active reservations", async () => {
+    vi.mocked(prisma.product.findMany).mockResolvedValue([
+      { id: "available", variants: [{ id: "variant-a", stockQuantity: 5, isActive: true }], reviews: [] },
+      { id: "held", variants: [{ id: "variant-b", stockQuantity: 2, isActive: true }], reviews: [] },
+    ] as never);
+    vi.mocked(prisma.stockReservation.updateMany).mockResolvedValue({ count: 0 } as never);
+    vi.mocked(prisma.stockReservationItem.groupBy).mockResolvedValue([
+      { variantId: "variant-a", _sum: { quantity: 3 } },
+      { variantId: "variant-b", _sum: { quantity: 2 } },
+    ] as never);
+    vi.mocked(prisma.productReview.groupBy).mockResolvedValue([] as never);
+    vi.mocked(prisma.orderLine.findMany).mockResolvedValue([] as never);
+
+    const products = await listPublicProducts(productQuerySchema.parse({ inStock: true }));
+
+    expect(products).toHaveLength(1);
+    expect(products[0]?.id).toBe("available");
+    expect(products[0]?.variants[0]?.stockQuantity).toBe(2);
+  });
+
   it("combines category and text filters and ranks by distinct completed orders", async () => {
     vi.mocked(prisma.product.findMany).mockResolvedValue([
       {

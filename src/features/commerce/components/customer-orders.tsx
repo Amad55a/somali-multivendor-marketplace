@@ -18,6 +18,17 @@ const returnSchema = z.object({
   photoKey: z.string().nullable(),
   vendorNote: z.string().nullable(),
   returnInstructions: z.string().nullable(),
+  adminNote: z.string().nullable(),
+  disputeResolution: z.string().nullable(),
+  reviewedByAdminAt: z.string().nullable(),
+  disputeUpdates: z.array(z.object({
+    id: z.string(),
+    authorRole: z.string(),
+    kind: z.string(),
+    content: z.string(),
+    requestedFrom: z.string().nullable(),
+    createdAt: z.string(),
+  })),
   createdAt: z.string(),
   refund: z.object({ id: z.string(), amount: z.string(), simulated: z.boolean() }).nullable(),
 });
@@ -87,7 +98,7 @@ const returnReasons = [
   ["INCORRECT_VARIANT", "Incorrect size or color", "Cabbir ama midab khaldan"],
   ["OTHER", "Other", "Sabab kale"],
 ] as const;
-const outstandingReturnStatuses = new Set(["REQUESTED", "VENDOR_APPROVED", "RETURN_SHIPPED", "ESCALATED", "ADMIN_APPROVED", "RECEIVED", "REFUND_PROCESSING"]);
+const outstandingReturnStatuses = new Set(["REQUESTED", "VENDOR_APPROVED", "RETURN_SHIPPED", "ESCALATED", "IN_REVIEW", "ADMIN_APPROVED", "RECEIVED", "REFUND_PROCESSING"]);
 const consumedReturnStatuses = new Set([...outstandingReturnStatuses, "RETURNED", "REFUNDED"]);
 
 function isWithinReturnWindow(deliveredAt: string | null) {
@@ -117,6 +128,7 @@ export function CustomerOrders({ locale }: Readonly<{ locale: Locale }>) {
   const [returnQuantity, setReturnQuantity] = useState(1);
   const [explanation, setExplanation] = useState("");
   const [returnPhoto, setReturnPhoto] = useState<File | null>(null);
+  const [disputeMessages, setDisputeMessages] = useState<Record<string, string>>({});
 
   const loadOrders = useCallback(async () => {
     const query = new URLSearchParams();
@@ -202,6 +214,31 @@ export function CustomerOrders({ locale }: Readonly<{ locale: Locale }>) {
         method: "POST",
         body: JSON.stringify({ action }),
       });
+      await loadOrders();
+      window.dispatchEvent(new Event("customer-notifications-updated"));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t("auth.requestFailed"));
+    } finally {
+      setBusy(false);
+    }
+
+  }
+
+  async function sendDisputeMessage(returnId: string) {
+    const note = disputeMessages[returnId]?.trim();
+    if (!note) {
+      setError(locale === "so" ? "Farriin geli ka hor dirista." : "Enter a message before sending.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await requestApi(`/api/v1/returns/${returnId}/action`, z.object({ returnRequest: z.any() }), t("auth.requestFailed"), {
+        method: "POST",
+        body: JSON.stringify({ action: "DISPUTE_MESSAGE", note }),
+      });
+      setDisputeMessages((current) => ({ ...current, [returnId]: "" }));
+      setMessage(locale === "so" ? "Farriinta waa la keydiyey." : "Your dispute message was saved.");
       await loadOrders();
       window.dispatchEvent(new Event("customer-notifications-updated"));
     } catch (reason) {
@@ -302,9 +339,20 @@ export function CustomerOrders({ locale }: Readonly<{ locale: Locale }>) {
                           {line.returns.map((returnRequest) => (
                             <div key={returnRequest.id} className="w-full rounded-lg border border-[#e1e9e5] bg-[#fbfcfb] p-3 text-xs">
                               <p className="font-semibold">{locale === "so" ? "Celinta" : "Return"} · {returnRequest.status.replaceAll("_", " ")} · {returnRequest.quantity} {locale === "so" ? "xabbo" : "item(s)"}</p>
-                              {returnRequest.returnInstructions && <p className="mt-1 text-slate-700">{locale === "so" ? "Tilmaamaha iibiyaha" : "Vendor instructions"}: {returnRequest.returnInstructions}</p>}
-                              {returnRequest.vendorNote && <p className="mt-1 text-slate-600">{returnRequest.vendorNote}</p>}
-                              {returnRequest.refund && <p className="mt-1 text-amber-800">{locale === "so" ? "Soo celin tijaabo ah" : "Simulated refund"}: ${returnRequest.refund.amount}. {locale === "so" ? "Lacag dhab ah lama wareejin." : "No real money was transferred."}</p>}
+                              {returnRequest.vendorNote && <p className="mt-1 text-slate-600"><span className="font-semibold">{locale === "so" ? "Sababta iibiyaha" : "Vendor's original decision"}:</span> {returnRequest.vendorNote}</p>}
+                              {returnRequest.disputeResolution && <p className="mt-1 font-semibold text-[#123b35]">{locale === "so" ? "Natiijada khilaafka" : "Dispute outcome"}: {returnRequest.disputeResolution.replaceAll("_", " ")}</p>}
+                              {returnRequest.adminNote && <p className="mt-1 text-slate-700"><span className="font-semibold">{locale === "so" ? "Sharaxaadda maamulka" : "Admin decision explanation"}:</span> {returnRequest.adminNote}{returnRequest.reviewedByAdminAt ? ` · ${new Date(returnRequest.reviewedByAdminAt).toLocaleString(locale)}` : ""}</p>}
+                              {returnRequest.returnInstructions && <p className="mt-1 text-slate-700"><span className="font-semibold">{locale === "so" ? "Tilmaamaha celinta" : "Return instructions"}:</span> {returnRequest.returnInstructions}</p>}
+                              {returnRequest.disputeUpdates.map((update) => <p key={update.id} className="mt-1 rounded bg-white p-2 text-slate-700"><span className="font-semibold">{update.authorRole} · {update.kind.replaceAll("_", " ")}:</span> {update.content} · {new Date(update.createdAt).toLocaleString(locale)}</p>)}
+                              {returnRequest.refund
+                                ? <p className="mt-1 text-amber-800">{locale === "so" ? "Xaaladda lacag celinta" : "Refund status"}: {locale === "so" ? "waa la diiwaangeliyey" : "recorded"} · ${returnRequest.refund.amount}. {locale === "so" ? "Lacag dhab ah lama wareejin." : "No real money was transferred."}</p>
+                                : ["ADMIN_APPROVED", "RETURN_SHIPPED", "RECEIVED", "REFUND_PROCESSING"].includes(returnRequest.status)
+                                  ? <p className="mt-1 text-amber-800">{locale === "so" ? "Xaaladda lacag celinta" : "Refund status"}: {locale === "so" ? "lama bixin" : "not issued"}</p>
+                                  : null}
+                              {["ESCALATED", "IN_REVIEW"].includes(returnRequest.status) && <div className="mt-2 grid gap-2">
+                                <textarea rows={2} maxLength={1000} aria-label={locale === "so" ? "Jawaab khilaaf" : "Dispute reply"} value={disputeMessages[returnRequest.id] ?? ""} onChange={(event) => setDisputeMessages((current) => ({ ...current, [returnRequest.id]: event.target.value }))} className="rounded border p-2" />
+                                <button type="button" disabled={busy} onClick={() => void sendDisputeMessage(returnRequest.id)} className="w-fit rounded border px-3 py-1 font-semibold disabled:opacity-50">{locale === "so" ? "Dir xog ama jawaab" : "Send information or reply"}</button>
+                              </div>}
                               {returnRequest.photoKey && <a href={`/api/v1/returns/${returnRequest.id}/photo`} target="_blank" rel="noreferrer" className="mt-2 inline-block text-[#8b5e08] underline">{locale === "so" ? "Eeg sawirka caddaynta" : "View supporting photo"}</a>}
                               {returnRequest.status === "VENDOR_REJECTED" && <button type="button" disabled={busy} onClick={() => void advanceReturn(returnRequest.id, "ESCALATE")} className="mt-2 font-semibold text-[#8b5e08] disabled:opacity-50">{locale === "so" ? "U gudbi maamulka" : "Escalate to admin"}</button>}
                               {["VENDOR_APPROVED", "ADMIN_APPROVED"].includes(returnRequest.status) && <button type="button" disabled={busy} onClick={() => void advanceReturn(returnRequest.id, "RETURN_SHIPPED")} className="mt-2 font-semibold text-[#8b5e08] disabled:opacity-50">{locale === "so" ? "Calaamadee in la soo diray" : "Mark return shipped"}</button>}

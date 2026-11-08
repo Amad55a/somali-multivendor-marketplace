@@ -1,0 +1,915 @@
+erDiagram
+    %% ==========================================
+    %% SOMSUUQ MARKETPLACE - ENTITY RELATIONSHIP DIAGRAM
+    %% Generated from prisma/schema.prisma (57 models, 32 enums)
+    %% ==========================================
+
+    %% ------------------------------------------
+    %% 1. IDENTITY, SESSIONS & SECURITY
+    %% ------------------------------------------
+    User ||--o{ UserAuthAccount : "authenticates via"
+    User ||--o{ UserSession : "establishes"
+    User ||--o{ AuditLog : "acts in"
+    User ||--o{ EmailVerificationCode : "receives OTP"
+    User ||--o| AdminMfaMethod : "enrolled in"
+    User ||--o{ AdminRecoveryCode : "owns"
+    User ||--o{ AdminLoginChallenge : "challenges"
+    User ||--o{ LoginAttempt : "logs"
+
+    User {
+        uuid id PK
+        varchar email
+        varchar normalizedEmail
+        AccountType accountType
+        timestamptz emailVerifiedAt
+        varchar displayName
+        varchar profileImageKey
+        boolean isActive
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    UserAuthAccount {
+        uuid id PK
+        uuid userId FK
+        AccountType accountType
+        AuthProvider provider
+        varchar providerAccountId
+        varchar passwordHash
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    UserSession {
+        uuid id PK
+        uuid userId FK
+        varchar sessionTokenHash UK
+        varchar refreshTokenHash UK
+        timestamptz lastActivityAt
+        timestamptz expiresAt
+        timestamptz refreshExpiresAt
+        timestamptz revokedAt
+        timestamptz createdAt
+    }
+
+    AuditLog {
+        uuid id PK
+        uuid actorUserId FK
+        varchar action
+        varchar entityType
+        uuid entityId
+        json metadata
+        timestamptz createdAt
+    }
+
+    EmailVerificationCode {
+        uuid id PK
+        uuid userId FK
+        varchar codeHash
+        VerificationPurpose purpose
+        timestamptz expiresAt
+        timestamptz usedAt
+        timestamptz createdAt
+    }
+
+    AdminMfaMethod {
+        uuid id PK
+        uuid userId FK,UK
+        varchar encryptedSecret
+        boolean enabled
+        timestamptz verifiedAt
+        timestamptz createdAt
+    }
+
+    AdminRecoveryCode {
+        uuid id PK
+        uuid userId FK
+        varchar codeHash
+        timestamptz usedAt
+        timestamptz createdAt
+    }
+
+    AdminLoginChallenge {
+        uuid id PK
+        uuid userId FK
+        varchar tokenHash UK
+        timestamptz expiresAt
+        timestamptz usedAt
+        timestamptz createdAt
+    }
+
+    LoginAttempt {
+        uuid id PK
+        uuid userId FK
+        varchar identifier
+        varchar ipAddress
+        boolean successful
+        timestamptz attemptedAt
+    }
+
+    %% ------------------------------------------
+    %% 2. VENDOR ONBOARDING & PROFILE MANAGEMENT
+    %% ------------------------------------------
+    User ||--o| VendorProfile : "operates store"
+    VendorProfile ||--o{ VendorApplicationFile : "contains documents"
+    VendorProfile ||--o{ VendorApplicationEmail : "notified via"
+    VendorProfile ||--o{ VendorProfileChangeRequest : "requests update"
+    VendorProfileChangeRequest ||--o{ VendorProfileChangeFile : "attaches proof"
+    User ||--o| VendorDeliveryRule : "sets delivery fee"
+
+    VendorProfile {
+        uuid id PK
+        uuid userId FK,UK
+        AccountType accountType
+        VendorApplicationStatus applicationStatus
+        VendorVerificationStatus verificationStatus
+        varchar businessName
+        varchar storeName
+        varchar businessType
+        varchar description
+        varchar contactName
+        varchar phone
+        varchar country
+        varchar region
+        varchar city
+        varchar district
+        varchar address
+        varchar marketAssociation
+        varchar mobileMoneyNumber
+        timestamptz submittedAt
+        timestamptz reviewedAt
+        uuid reviewedById FK
+        varchar rejectionReason
+        varchar informationRequest
+        decimal deliveryFee
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    VendorApplicationFile {
+        uuid id PK
+        uuid vendorProfileId FK
+        VendorFileType fileType
+        varchar storageKey UK
+        varchar originalName
+        varchar mimeType
+        int sizeBytes
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    VendorApplicationEmail {
+        uuid id PK
+        uuid vendorProfileId FK
+        VendorApplicationEmailEvent event
+        varchar recipientEmail
+        int attemptCount
+        timestamptz sentAt
+        timestamptz lastAttemptAt
+        varchar lastError
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    VendorProfileChangeRequest {
+        uuid id PK
+        uuid vendorProfileId FK
+        VendorProfileChangeStatus status
+        json proposed
+        json currentSnapshot
+        varchar vendorNote
+        varchar adminNote
+        timestamptz submittedAt
+        timestamptz reviewedAt
+        uuid reviewedById FK
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    VendorProfileChangeFile {
+        uuid id PK
+        uuid changeRequestId FK
+        VendorFileType fileType
+        varchar storageKey UK
+        varchar originalName
+        varchar mimeType
+        int sizeBytes
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    VendorDeliveryRule {
+        uuid id PK
+        uuid vendorId FK,UK
+        decimal fee
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    %% ------------------------------------------
+    %% 3. PRODUCT CATALOGUE & INVENTORY
+    %% ------------------------------------------
+    Category ||--o{ Category : "parent of"
+    Category ||--o{ Product : "classifies"
+    User ||--o{ Product : "lists as vendor"
+    Product ||--o{ ProductVariant : "has variants"
+    Product ||--o{ ProductImage : "has gallery"
+    User ||--o{ ProductImage : "uploads image"
+
+    Category {
+        uuid id PK
+        varchar name
+        varchar nameSo
+        varchar slug UK
+        varchar description
+        varchar descriptionSo
+        varchar imageKey
+        boolean isActive
+        uuid parentId FK
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    Product {
+        uuid id PK
+        uuid vendorId FK
+        uuid categoryId FK
+        varchar name
+        varchar nameSo
+        varchar slug
+        varchar description
+        varchar descriptionSo
+        varchar brand
+        ProductCondition condition
+        ProductStatus status
+        varchar marketAssociation
+        varchar country
+        varchar region
+        varchar city
+        varchar marketName
+        timestamptz publishedAt
+        timestamptz archivedAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    ProductVariant {
+        uuid id PK
+        uuid productId FK
+        varchar sku UK
+        varchar variantName
+        json attributes
+        decimal price
+        decimal compareAtPrice
+        int stockQuantity
+        boolean isActive
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    ProductImage {
+        uuid id PK
+        uuid productId FK
+        uuid vendorId FK
+        varchar storageKey UK
+        varchar originalName
+        varchar mimeType
+        int sizeBytes
+        int sortOrder
+        boolean isPrimary
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    %% ------------------------------------------
+    %% 4. SHOPPING CART & STOCK RESERVATION
+    %% ------------------------------------------
+    User ||--o| ShoppingCart : "owns cart"
+    ShoppingCart ||--o{ CartItem : "contains items"
+    ProductVariant ||--o{ CartItem : "item variant"
+    User ||--o{ StockReservation : "creates reservation"
+    StockReservation ||--o{ StockReservationItem : "locks stock"
+    ProductVariant ||--o{ StockReservationItem : "reserved variant"
+
+    ShoppingCart {
+        uuid id PK
+        uuid userId FK,UK
+        varchar guestKey UK
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    CartItem {
+        uuid id PK
+        uuid cartId FK
+        uuid variantId FK
+        int quantity
+        decimal capturedPrice
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    StockReservation {
+        uuid id PK
+        uuid customerId FK
+        uuid orderId FK,UK
+        StockReservationStatus status
+        timestamptz expiresAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    StockReservationItem {
+        uuid id PK
+        uuid reservationId FK
+        uuid variantId FK
+        int quantity
+        decimal unitPrice
+    }
+
+    %% ------------------------------------------
+    %% 5. ORDERS, SUB-ORDERS & PAYMENTS
+    %% ------------------------------------------
+    User ||--o{ MarketplaceOrder : "places parent order"
+    MarketplaceOrder ||--o{ VendorOrder : "splits into sub-orders"
+    User ||--o{ VendorOrder : "fulfills as vendor"
+    VendorOrder ||--o{ OrderLine : "contains lines"
+    ProductVariant ||--o{ OrderLine : "references variant"
+    MarketplaceOrder ||--o| PaymentRecord : "payment record"
+    StockReservation ||--o{ SimulatedPaymentAttempt : "attempted for"
+    User ||--o{ SimulatedPaymentAttempt : "initiates payment"
+    MarketplaceOrder ||--o| PaymentReceipt : "issues receipt"
+    SimulatedPaymentAttempt ||--o| PaymentReceipt : "receipt source"
+    MarketplaceOrder ||--o{ SmsOutboxMessage : "dispatches SMS"
+
+    MarketplaceOrder {
+        uuid id PK
+        varchar orderNumber UK
+        uuid customerId FK
+        MarketplaceOrderStatus status
+        varchar currency
+        decimal subtotalAmount
+        decimal totalAmount
+        varchar contactName
+        varchar email
+        varchar phone
+        varchar country
+        varchar region
+        varchar city
+        varchar district
+        varchar address
+        varchar instructions
+        PaymentMode paymentMode
+        PaymentRecordStatus paymentStatus
+        boolean simulated
+        decimal platformDiscount
+        decimal deliveryTotal
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    VendorOrder {
+        uuid id PK
+        uuid orderId FK
+        uuid vendorId FK
+        VendorOrderStatus status
+        decimal subtotalAmount
+        timestamptz confirmBy
+        timestamptz confirmedAt
+        varchar courier
+        varchar trackingNumber
+        timestamptz expectedDelivery
+        varchar deliveryNote
+        timestamptz deliveredAt
+        varchar deliveredBy
+        decimal deliveryFee
+        decimal discountAmount
+        timestamptz packedAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    OrderLine {
+        uuid id PK
+        uuid vendorOrderId FK
+        uuid variantId FK
+        varchar productName
+        varchar productNameSo
+        varchar variantName
+        varchar sku
+        decimal unitPrice
+        int quantity
+        uuid imageId
+        uuid categoryId
+        decimal commissionPercent
+        decimal commissionAmount
+        timestamptz createdAt
+    }
+
+    PaymentRecord {
+        uuid id PK
+        uuid orderId FK,UK
+        PaymentMode mode
+        PaymentRecordStatus status
+        boolean simulated
+        varchar simulatedOutcome
+        SimulatedPaymentMethod method
+        varchar phone
+        varchar idempotencyKey UK
+        decimal amount
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    SimulatedPaymentAttempt {
+        uuid id PK
+        uuid customerId FK
+        uuid reservationId FK
+        uuid orderId FK
+        SimulatedPaymentMethod method
+        varchar maskedPhone
+        decimal amount
+        varchar currency
+        varchar transactionReference UK
+        SimulatedPaymentAttemptStatus status
+        varchar failureReason
+        varchar provider
+        boolean simulated
+        varchar idempotencyKey UK
+        timestamptz createdAt
+        timestamptz completedAt
+    }
+
+    PaymentReceipt {
+        uuid id PK
+        varchar receiptNumber UK
+        uuid orderId FK,UK
+        uuid paymentAttemptId FK,UK
+        uuid customerId FK
+        varchar customerName
+        SimulatedPaymentMethod method
+        varchar maskedMobile
+        decimal amount
+        varchar currency
+        varchar transactionReference
+        timestamptz paidAt
+        boolean simulated
+        timestamptz createdAt
+    }
+
+    SmsOutboxMessage {
+        uuid id PK
+        varchar recipient
+        varchar message
+        varchar messageType
+        uuid relatedUserId FK
+        uuid orderId FK
+        uuid paymentAttemptId FK
+        SmsOutboxStatus status
+        varchar deliveryMode
+        varchar error
+        varchar idempotencyKey UK
+        timestamptz createdAt
+    }
+
+    %% ------------------------------------------
+    %% 6. REVIEWS, COUPONS & RETURNS
+    %% ------------------------------------------
+    Product ||--o{ ProductReview : "receives reviews"
+    User ||--o{ ProductReview : "authors reviews"
+    OrderLine ||--o| ProductReview : "verifies purchase"
+    User ||--o{ Coupon : "issues vendor coupon"
+    Coupon ||--o{ CouponRedemption : "redeemed in"
+    MarketplaceOrder ||--o{ CouponRedemption : "applies discount"
+    VendorOrder ||--o{ CouponRedemption : "applies vendor discount"
+    User ||--o{ CouponRedemption : "redeemed by customer"
+    MarketplaceOrder ||--o{ ReturnRequest : "subject of return"
+    OrderLine ||--o{ ReturnRequest : "returned line"
+    User ||--o{ ReturnRequest : "customer return"
+    ReturnRequest ||--o{ ReturnDisputeUpdate : "dispute history"
+    MarketplaceOrder ||--o{ SimulatedRefund : "refund issued"
+    VendorOrder ||--o{ SimulatedRefund : "vendor sub-order refund"
+    ReturnRequest ||--o| SimulatedRefund : "triggers refund"
+
+    ProductReview {
+        uuid id PK
+        uuid productId FK
+        uuid customerId FK
+        uuid orderLineId FK,UK
+        int rating
+        varchar comment
+        varchar photoKey
+        timestamptz hiddenAt
+        varchar hiddenReason
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    Coupon {
+        uuid id PK
+        varchar code UK
+        CouponScope scope
+        uuid vendorId FK
+        DiscountType discountType
+        decimal discountValue
+        decimal minOrderAmount
+        timestamptz startsAt
+        timestamptz endsAt
+        int totalUsageLimit
+        int perCustomerLimit
+        boolean isActive
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    CouponRedemption {
+        uuid id PK
+        uuid couponId FK
+        uuid customerId FK
+        uuid orderId FK
+        uuid vendorOrderId FK
+        decimal amount
+        timestamptz createdAt
+    }
+
+    ReturnRequest {
+        uuid id PK
+        uuid orderId FK
+        uuid orderLineId FK
+        uuid customerId FK
+        uuid vendorId FK
+        ReturnRequestStatus status
+        int quantity
+        varchar reason
+        varchar explanation
+        varchar photoKey
+        varchar vendorNote
+        varchar returnInstructions
+        varchar adminNote
+        varchar disputeResolution
+        timestamptz reviewedByVendorAt
+        timestamptz reviewedByAdminAt
+        uuid reviewedByAdminId FK
+        timestamptz escalatedAt
+        timestamptz returnShippedAt
+        varchar returnShipmentNote
+        timestamptz receivedAt
+        timestamptz refundProcessedAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    ReturnDisputeUpdate {
+        uuid id PK
+        uuid returnRequestId FK
+        AccountType authorRole
+        varchar audience
+        varchar kind
+        varchar content
+        varchar requestedFrom
+        timestamptz createdAt
+    }
+
+    SimulatedRefund {
+        uuid id PK
+        uuid orderId FK
+        uuid vendorOrderId FK
+        uuid returnId FK,UK
+        decimal amount
+        varchar reason
+        boolean simulated
+        timestamptz createdAt
+    }
+
+    %% ------------------------------------------
+    %% 7. COMMISSIONS, FINANCIAL LEDGER & PAYOUTS
+    %% ------------------------------------------
+    Category ||--o| CategoryCommission : "has rate"
+    User ||--o{ CategoryCommission : "updated by admin"
+    User ||--o{ CommissionSettings : "updated default rate"
+    Category ||--o{ CategoryCommissionHistory : "rate history"
+    User ||--o{ CategoryCommissionHistory : "changed by admin"
+    User ||--o{ LedgerEntry : "vendor account balance"
+    MarketplaceOrder ||--o{ LedgerEntry : "order settlement"
+    VendorOrder ||--o{ LedgerEntry : "sub-order settlement"
+    OrderLine ||--o{ LedgerEntry : "line commission"
+    Coupon ||--o{ LedgerEntry : "discount absorption"
+    LedgerEntry ||--o| LedgerEntry : "reversal/related"
+    User ||--o{ PayoutBatch : "created by admin"
+    User ||--o{ VendorPayout : "payout to vendor"
+    PayoutBatch ||--o{ VendorPayout : "contains payouts"
+    VendorPayout ||--o{ LedgerEntry : "settles ledger entries"
+    VendorPayout ||--o{ PayoutAllocation : "allocates entry"
+    LedgerEntry ||--o{ PayoutAllocation : "allocated to payout"
+
+    CategoryCommission {
+        uuid id PK
+        uuid categoryId FK,UK
+        decimal percent
+        boolean isActive
+        uuid updatedById FK
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    CommissionSettings {
+        varchar id PK
+        decimal defaultPercent
+        uuid updatedById FK
+        timestamptz updatedAt
+    }
+
+    CategoryCommissionHistory {
+        uuid id PK
+        uuid categoryId FK
+        varchar categoryName
+        decimal previousPercent
+        decimal percent
+        boolean isActive
+        uuid changedById FK
+        timestamptz createdAt
+    }
+
+    LedgerEntry {
+        uuid id PK
+        uuid vendorId FK
+        uuid orderId FK
+        uuid vendorOrderId FK
+        uuid orderLineId FK
+        uuid payoutId FK
+        uuid couponId FK
+        uuid relatedEntryId FK
+        LedgerEntryType type
+        decimal amount
+        varchar currency
+        varchar description
+        varchar idempotencyKey UK
+        boolean simulated
+        timestamptz createdAt
+    }
+
+    PayoutBatch {
+        uuid id PK
+        varchar weekKey UK
+        timestamptz periodStart
+        timestamptz periodEnd
+        PayoutStatus status
+        uuid createdById FK
+        uuid approvedById FK
+        timestamptz approvedAt
+        timestamptz processedAt
+        timestamptz createdAt
+    }
+
+    VendorPayout {
+        uuid id PK
+        uuid vendorId FK
+        uuid batchId FK
+        varchar reference UK
+        timestamptz periodStart
+        timestamptz periodEnd
+        decimal amount
+        varchar currency
+        PayoutStatus status
+        varchar idempotencyKey UK
+        boolean simulated
+        uuid approvedById FK
+        timestamptz approvedAt
+        timestamptz processedAt
+        varchar failureReason
+        timestamptz createdAt
+    }
+
+    PayoutAllocation {
+        uuid id PK
+        uuid payoutId FK
+        uuid ledgerEntryId FK
+        timestamptz releasedAt
+        varchar releaseReason
+        timestamptz createdAt
+    }
+
+    %% ------------------------------------------
+    %% 8. SUPPORT TICKETING SYSTEM
+    %% ------------------------------------------
+    User ||--o{ SupportTicket : "opens ticket"
+    User ||--o{ SupportTicket : "assigned to staff"
+    MarketplaceOrder ||--o{ SupportTicket : "related order"
+    VendorProfile ||--o{ SupportTicket : "related store"
+    Product ||--o{ SupportTicket : "related product"
+    SupportTicket ||--o{ SupportMessage : "has messages"
+    User ||--o{ SupportMessage : "sends message"
+    SupportMessage ||--o{ SupportAttachment : "attaches files"
+    User ||--o{ SupportAttachment : "uploads file"
+    SupportTicket ||--o{ SupportTicketActivity : "activity timeline"
+    User ||--o{ SupportTicketActivity : "actor"
+    SupportTicketActivity ||--o| SupportEmailDelivery : "delivers email"
+
+    SupportTicket {
+        uuid id PK
+        varchar reference UK
+        uuid requesterId FK
+        AccountType requesterRole
+        varchar requesterLocale
+        varchar subject
+        varchar description
+        SupportTicketCategory category
+        SupportTicketPriority priority
+        SupportTicketStatus status
+        uuid assignedToId FK
+        uuid relatedOrderId FK
+        uuid vendorProfileId FK
+        uuid productId FK
+        varchar idempotencyKey
+        timestamptz resolvedAt
+        timestamptz closedAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    SupportMessage {
+        uuid id PK
+        uuid ticketId FK
+        uuid senderId FK
+        AccountType senderRole
+        varchar content
+        boolean internalNote
+        varchar idempotencyKey
+        timestamptz requesterReadAt
+        timestamptz staffReadAt
+        timestamptz createdAt
+    }
+
+    SupportAttachment {
+        uuid id PK
+        uuid messageId FK
+        varchar storageKey UK
+        varchar originalName
+        varchar mimeType
+        int sizeBytes
+        uuid uploadedById FK
+        varchar idempotencyKey
+        timestamptz createdAt
+    }
+
+    SupportTicketActivity {
+        uuid id PK
+        uuid ticketId FK
+        uuid actorId FK
+        AccountType actorRole
+        SupportTicketActivityType type
+        json metadata
+        timestamptz createdAt
+    }
+
+    SupportEmailDelivery {
+        uuid id PK
+        uuid ticketId FK
+        uuid activityId FK,UK
+        SupportEmailEvent event
+        SupportEmailDeliveryStatus status
+        varchar recipientEmail
+        varchar locale
+        int attemptCount
+        timestamptz lastAttemptAt
+        varchar lastError
+        timestamptz sentAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    %% ------------------------------------------
+    %% 9. BUYER-VENDOR COMMUNICATIONS & MESSAGING
+    %% ------------------------------------------
+    User ||--o{ Conversation : "customer participant"
+    User ||--o{ Conversation : "vendor participant"
+    Conversation ||--o{ ConversationMessage : "message stream"
+    User ||--o{ ConversationMessage : "message author"
+    Product ||--o{ ConversationMessage : "shared product card"
+    ConversationMessage ||--o{ ConversationAttachment : "attaches media"
+    User ||--o{ ConversationAttachment : "media uploader"
+    Conversation ||--o{ CommunicationBlock : "scoped block"
+    User ||--o{ CommunicationBlock : "blocker"
+    User ||--o{ CommunicationBlock : "blocked"
+    Conversation ||--o{ CommunicationReport : "moderation report"
+    User ||--o{ CommunicationReport : "reporter"
+    User ||--o{ CommunicationReport : "reported user"
+    User ||--o{ CommunicationReport : "reviewed by admin"
+    Conversation ||--o{ ConversationPresence : "tracks presence"
+    User ||--o{ ConversationPresence : "participant presence"
+
+    Conversation {
+        uuid id PK
+        uuid customerId FK
+        uuid vendorId FK
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    ConversationMessage {
+        uuid id PK
+        uuid conversationId FK
+        uuid senderId FK
+        ConversationMessageType type
+        varchar content
+        uuid productId FK
+        json attachmentData
+        varchar clientMessageId
+        timestamptz deliveredAt
+        timestamptz readAt
+        timestamptz createdAt
+    }
+
+    ConversationAttachment {
+        uuid id PK
+        uuid messageId FK
+        uuid uploadedById FK
+        varchar storageKey UK
+        varchar originalName
+        varchar mimeType
+        int sizeBytes
+        timestamptz createdAt
+    }
+
+    CommunicationBlock {
+        uuid id PK
+        uuid blockerId FK
+        uuid blockedId FK
+        uuid conversationId FK
+        timestamptz createdAt
+    }
+
+    CommunicationReport {
+        uuid id PK
+        uuid conversationId FK
+        uuid reporterId FK
+        uuid reportedUserId FK
+        CommunicationReportReason reason
+        varchar explanation
+        CommunicationReportStatus status
+        varchar decisionReason
+        uuid reviewedById FK
+        timestamptz reviewedAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    ConversationPresence {
+        uuid id PK
+        uuid conversationId FK
+        uuid userId FK
+        timestamptz lastSeenAt
+        timestamptz createdAt
+        timestamptz updatedAt
+    }
+
+    %% ------------------------------------------
+    %% 10. NOTIFICATIONS
+    %% ------------------------------------------
+    User ||--o{ CustomerNotification : "customer alerts"
+    User ||--o{ VendorNotification : "vendor alerts"
+
+    CustomerNotification {
+        uuid id PK
+        uuid customerId FK
+        varchar title
+        varchar titleSo
+        varchar body
+        varchar bodySo
+        varchar entityType
+        uuid entityId
+        varchar dedupeKey UK
+        varchar href
+        timestamptz readAt
+        timestamptz createdAt
+    }
+
+    VendorNotification {
+        uuid id PK
+        uuid vendorId FK
+        varchar title
+        varchar titleSo
+        varchar body
+        varchar bodySo
+        varchar entityType
+        uuid entityId
+        varchar dedupeKey UK
+        varchar href
+        timestamptz readAt
+        timestamptz createdAt
+    }
+
+    AdminNotification {
+        uuid id PK
+        varchar type
+        varchar title
+        varchar titleSo
+        varchar body
+        varchar bodySo
+        varchar href
+        varchar entityType
+        uuid entityId
+        varchar dedupeKey UK
+        timestamptz readAt
+        timestamptz createdAt
+    }

@@ -117,7 +117,11 @@ export function MarketplaceBrowser({
                   {product.vendor.vendorProfile?.files[0] && <Image src={`/api/v1/vendors/${product.vendor.id}/logo`} alt="" width={48} height={48} unoptimized className="absolute bottom-2 end-2 size-10 rounded-full border-2 border-white bg-white object-cover shadow" />}
                 </div>
                 <h2 className="mt-3 truncate font-semibold text-[#123b35]">{locale === "so" ? product.nameSo || product.name : product.name}</h2>
-                <p className="text-xs text-slate-500">{product.vendor.vendorProfile?.storeName ?? product.vendor.displayName}</p>
+              </Link>
+              <Link href={`/${locale}/stores/${product.vendor.id}`} className="mt-1 block truncate text-xs text-slate-500 hover:text-[#8b5e08] hover:underline">
+                {product.vendor.vendorProfile?.storeName ?? product.vendor.displayName}
+              </Link>
+              <Link href={`/${locale}/marketplace/${product.id}`} className="block">
                 <p className="mt-2 font-bold text-[#123b35]">{prices.length ? `$${Math.min(...prices).toFixed(2)}` : "—"}</p>
                 <p className="text-xs text-slate-500">{inStock ? t("shop.inStock") : t("shop.outOfStock")}</p>
                 <p className="mt-1 text-xs text-slate-600">{t("shop.reviewSummary").replace("{rating}", product.reviewCount ? product.ratingAverage.toFixed(1) : "—").replace("{count}", String(product.reviewCount))}</p>
@@ -128,7 +132,11 @@ export function MarketplaceBrowser({
                 disabled={!availableVariant}
                 onClick={() => {
                   if (!availableVariant) return;
-                  void addCartItem(availableVariant.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t("shop.noResults")));
+                  void addCartItem(availableVariant.id).catch(async (reason: unknown) => {
+                    const message = reason instanceof Error ? reason.message : t("shop.noResults");
+                    await loadCatalog();
+                    setError(message);
+                  });
                 }}
                 className="mt-3 w-full rounded-lg bg-[#f4b942] px-3 py-2 text-sm font-bold text-[#123b35] disabled:cursor-not-allowed disabled:opacity-50"
               >

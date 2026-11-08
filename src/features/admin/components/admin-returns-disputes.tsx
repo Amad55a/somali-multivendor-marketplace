@@ -18,6 +18,17 @@ const returnSchema = z.object({
   vendorNote: z.string().nullable(),
   returnInstructions: z.string().nullable(),
   adminNote: z.string().nullable(),
+  disputeResolution: z.string().nullable(),
+  reviewedByAdminAt: z.string().nullable(),
+  disputeUpdates: z.array(z.object({
+    id: z.string(),
+    authorRole: z.string(),
+    audience: z.string(),
+    kind: z.string(),
+    content: z.string(),
+    requestedFrom: z.string().nullable(),
+    createdAt: z.string(),
+  })),
   createdAt: z.string(),
   order: z.object({ id: z.string(), orderNumber: z.string() }),
   customer: z.object({ displayName: z.string().nullable(), email: z.string() }),
@@ -42,7 +53,10 @@ const returnSchema = z.object({
 });
 const responseSchema = z.object({ returns: z.array(returnSchema) });
 type ReturnRequest = z.infer<typeof returnSchema>;
-const statusOptions = ["REQUESTED", "VENDOR_APPROVED", "VENDOR_REJECTED", "RETURN_SHIPPED", "ESCALATED", "ADMIN_APPROVED", "ADMIN_REJECTED", "RECEIVED", "REFUNDED"];
+const statusOptions = ["REQUESTED", "VENDOR_APPROVED", "VENDOR_REJECTED", "RETURN_SHIPPED", "ESCALATED", "IN_REVIEW", "ADMIN_APPROVED", "ADMIN_REJECTED", "RECEIVED", "REFUNDED"];
+const adminActionSchema = z.object({
+  returnRequest: z.object({ status: z.string(), reviewedByAdminAt: z.string().nullable() }),
+});
 
 export function AdminReturnsDisputes({ locale }: Readonly<{ locale: Locale }>) {
   const { t } = useTranslation();
@@ -50,9 +64,11 @@ export function AdminReturnsDisputes({ locale }: Readonly<{ locale: Locale }>) {
   const [status, setStatus] = useState("");
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [instructions, setInstructions] = useState<Record<string, string>>({});
+  const [targets, setTargets] = useState<Record<string, "CUSTOMER" | "VENDOR" | "BOTH">>({});
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const isSomali = locale === "so";
 
   const loadReturns = useCallback(async () => {
@@ -69,21 +85,42 @@ export function AdminReturnsDisputes({ locale }: Readonly<{ locale: Locale }>) {
   }, [status, t]);
   useVisiblePolling(loadReturns, 30_000);
 
-  async function decide(request: ReturnRequest, action: "ADMIN_APPROVE" | "ADMIN_REJECT") {
+  async function decide(request: ReturnRequest, action: "ADMIN_START_REVIEW" | "ADMIN_UPHOLD" | "ADMIN_OVERTURN" | "ADMIN_REQUEST_INFO" | "ADMIN_MESSAGE") {
     const reason = reasons[request.id]?.trim();
+    const target = targets[request.id] ?? "BOTH";
     if (!reason) {
       setError(isSomali ? "Sababta go'aanka waa waajib." : "A decision reason is required.");
       return;
     }
-    if (!window.confirm(isSomali ? "Ma xaqiijinaysaa go'aanka khilaafka?" : "Confirm this dispute decision?")) return;
+    if (action === "ADMIN_OVERTURN" && !instructions[request.id]?.trim()) {
+      setError(isSomali ? "Tilmaamaha celinta waa waajib marka la oggolaado." : "Return instructions are required to authorize the return.");
+      return;
+    }
+    const finalDecision = action === "ADMIN_UPHOLD" || action === "ADMIN_OVERTURN";
+    if (!window.confirm(finalDecision
+      ? (isSomali ? "Ma xaqiijinaysaa go'aanka kama dambaysta ah?" : "Confirm this final dispute decision?")
+      : (isSomali ? "Ma xaqiijinaysaa tallaabadan?" : "Confirm this dispute action?"))) return;
     setBusyId(request.id);
     setError(null);
+    setSuccess(null);
     try {
-      await requestApi(`/api/v1/returns/${request.id}/action`, z.object({ returnRequest: z.any() }), t("auth.requestFailed"), postJson({
+      const result = await requestApi(`/api/v1/returns/${request.id}/action`, adminActionSchema, t("auth.requestFailed"), postJson({
         action,
         note: reason,
-        ...(action === "ADMIN_APPROVE" && instructions[request.id]?.trim() ? { instructions: instructions[request.id].trim() } : {}),
+        ...(action === "ADMIN_OVERTURN" ? { instructions: instructions[request.id].trim() } : {}),
+        ...(["ADMIN_REQUEST_INFO", "ADMIN_MESSAGE"].includes(action) ? { target } : {}),
       }));
+      const expectedStatus = action === "ADMIN_START_REVIEW" || action === "ADMIN_REQUEST_INFO"
+        ? "IN_REVIEW"
+        : action === "ADMIN_UPHOLD"
+          ? "ADMIN_REJECTED"
+          : action === "ADMIN_OVERTURN"
+            ? "ADMIN_APPROVED"
+            : request.status;
+      if (result.returnRequest.status !== expectedStatus) {
+        throw new Error(isSomali ? "Xogta la keydiyey ma waafaqsana tallaabada la doortay." : "The saved dispute state did not match the selected action.");
+      }
+      setSuccess(`${isSomali ? "Waa la keydiyey" : "Saved"}: ${result.returnRequest.status.replaceAll("_", " ")}${result.returnRequest.reviewedByAdminAt ? ` · ${new Date(result.returnRequest.reviewedByAdminAt).toLocaleString(locale)}` : ""}`);
       await loadReturns();
       window.dispatchEvent(new Event("admin-notifications-updated"));
     } catch (reason) {
@@ -104,6 +141,7 @@ export function AdminReturnsDisputes({ locale }: Readonly<{ locale: Locale }>) {
         </select>
       </label>
       {error && <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+      {success && <p role="status" className="mt-4 rounded-xl bg-green-50 p-3 text-sm text-green-800">{success}</p>}
       {loading && returns.length === 0 && <p className="mt-5 text-sm text-slate-600">{t("header.searchLoading")}</p>}
       <div className="mt-5 grid gap-4">
         {returns.map((request) => (
@@ -126,6 +164,11 @@ export function AdminReturnsDisputes({ locale }: Readonly<{ locale: Locale }>) {
                 {request.vendorNote && <p><span className="font-semibold">{isSomali ? "Go'aanka iibiyaha" : "Vendor decision"}:</span> {request.vendorNote}</p>}
                 {request.returnInstructions && <p><span className="font-semibold">{isSomali ? "Tilmaamaha celinta" : "Return instructions"}:</span> {request.returnInstructions}</p>}
                 {request.adminNote && <p><span className="font-semibold">{isSomali ? "Sababta maamulka" : "Admin decision reason"}:</span> {request.adminNote}</p>}
+                {request.disputeResolution && <p><span className="font-semibold">{isSomali ? "Natiijada khilaafka" : "Dispute outcome"}:</span> {request.disputeResolution.replaceAll("_", " ")}</p>}
+                {request.reviewedByAdminAt && <p><span className="font-semibold">{isSomali ? "Go'aanka la keydiyey" : "Decision saved"}:</span> {new Date(request.reviewedByAdminAt).toLocaleString(locale)}</p>}
+                {request.disputeUpdates.map((update) => (
+                  <p key={update.id} className="rounded-lg bg-slate-50 p-2"><span className="font-semibold">{update.authorRole} · {update.kind.replaceAll("_", " ")} · {update.audience}:</span> {update.content} <span className="text-xs text-slate-500">{new Date(update.createdAt).toLocaleString(locale)}</span></p>
+                ))}
               </div>
               {request.photoKey && <a href={`/api/v1/returns/${request.id}/photo`} target="_blank" rel="noreferrer" className="block h-fit"><Image src={`/api/v1/returns/${request.id}/photo`} alt={isSomali ? "Sawirka caddaynta" : "Return evidence"} width={280} height={200} unoptimized className="max-h-48 w-full rounded-xl object-cover lg:w-64" /></a>}
             </div>
@@ -138,17 +181,27 @@ export function AdminReturnsDisputes({ locale }: Readonly<{ locale: Locale }>) {
                 </ul>
               </details>
             )}
-            {request.status === "ESCALATED" && (
+            {["ESCALATED", "IN_REVIEW"].includes(request.status) && (
               <div className="mt-4 grid gap-3 border-t border-[#e7ece9] pt-4">
-                <label className="grid gap-1 text-sm font-semibold">{isSomali ? "Sababta go'aanka (waa waajib)" : "Mandatory decision reason"}
+                <label className="grid gap-1 text-sm font-semibold">{isSomali ? "Sababta ama farriinta" : "Decision explanation or message"}
                   <textarea rows={2} maxLength={1000} value={reasons[request.id] ?? ""} onChange={(event) => setReasons((current) => ({ ...current, [request.id]: event.target.value }))} className="rounded-xl border p-3 font-normal" />
                 </label>
-                <label className="grid gap-1 text-sm font-semibold">{isSomali ? "Tilmaamaha celinta haddii la oggolaado" : "Return instructions if approved"}
+                <label className="grid gap-1 text-sm font-semibold">{isSomali ? "Cidda lala xiriirayo" : "Party to contact"}
+                  <select value={targets[request.id] ?? "BOTH"} onChange={(event) => setTargets((current) => ({ ...current, [request.id]: event.target.value as "CUSTOMER" | "VENDOR" | "BOTH" }))} className="min-h-10 rounded-xl border px-3 font-normal">
+                    <option value="BOTH">{isSomali ? "Labada dhinac" : "Both parties"}</option>
+                    <option value="CUSTOMER">{isSomali ? "Macmiilka" : "Customer"}</option>
+                    <option value="VENDOR">{isSomali ? "Iibiyaha" : "Vendor"}</option>
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm font-semibold">{isSomali ? "Tilmaamaha celinta (waajib marka la beddelayo diidmada)" : "Return instructions (required to overturn)"}
                   <textarea rows={2} maxLength={1000} value={instructions[request.id] ?? ""} onChange={(event) => setInstructions((current) => ({ ...current, [request.id]: event.target.value }))} className="rounded-xl border p-3 font-normal" />
                 </label>
                 <div className="flex flex-wrap gap-2">
-                  <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "ADMIN_APPROVE")} className="rounded-lg bg-[#123b35] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{isSomali ? "Oggolow khilaafka" : "Approve escalation"}</button>
-                  <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "ADMIN_REJECT")} className="rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50">{isSomali ? "Diid khilaafka" : "Reject escalation"}</button>
+                  {request.status === "ESCALATED" && <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "ADMIN_START_REVIEW")} className="rounded-lg bg-[#123b35] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{busyId === request.id ? t("vendor.submitting") : isSomali ? "Qaado dib-u-eegis" : "Take under review"}</button>}
+                  <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "ADMIN_OVERTURN")} className="rounded-lg bg-green-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{isSomali ? "Beddel diidmada oo oggolow celinta" : "Overturn & authorize return"}</button>
+                  <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "ADMIN_UPHOLD")} className="rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50">{isSomali ? "Xaqiiji diidmada iibiyaha" : "Uphold vendor decision"}</button>
+                  <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "ADMIN_REQUEST_INFO")} className="rounded-lg border px-4 py-2 text-sm font-semibold disabled:opacity-50">{isSomali ? "Codso xog dheeraad ah" : "Request more information"}</button>
+                  <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "ADMIN_MESSAGE")} className="rounded-lg border px-4 py-2 text-sm font-semibold disabled:opacity-50">{isSomali ? "U dir farriin" : "Send message"}</button>
                 </div>
               </div>
             )}

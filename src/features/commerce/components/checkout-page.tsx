@@ -72,6 +72,7 @@ export function CheckoutPage({ locale, customerName, customerEmail }: Readonly<{
   const [remaining, setRemaining] = useState(0);
   const [serverClockOffset, setServerClockOffset] = useState(0);
   const [orderId, setOrderId] = useState<string | null>(null);
+  const [vendorCoupons, setVendorCoupons] = useState<Record<string, string>>({});
   const [form, setForm] = useState({ contactName: customerName ?? "", checkoutPhone: "", country: "Somalia", region: "", city: "", district: "", address: "", instructions: "", method: "EVC_PLUS", phone: "", platformCoupon: "" });
 
   useLayoutEffect(() => {
@@ -109,14 +110,25 @@ export function CheckoutPage({ locale, customerName, customerEmail }: Readonly<{
   useEffect(() => {
     if (!reservation) return;
     const coupon = form.platformCoupon.trim();
-    if (!coupon) return;
+    const activeVendorCoupons = Object.fromEntries(
+      Object.entries(vendorCoupons)
+        .map(([vendorId, code]) => [vendorId, code.trim()])
+        .filter(([, code]) => Boolean(code)),
+    );
+    if (!coupon && Object.keys(activeVendorCoupons).length === 0) {
+      return;
+    }
     let active = true;
     const timer = window.setTimeout(() => {
       void requestApi(
         "/api/v1/checkout/quote",
         quoteSchema,
         t("auth.requestFailed"),
-        postJson({ reservationId: reservation.reservationId, platformCoupon: coupon }),
+        postJson({
+          reservationId: reservation.reservationId,
+          ...(coupon ? { platformCoupon: coupon } : {}),
+          ...(Object.keys(activeVendorCoupons).length ? { vendorCoupons: activeVendorCoupons } : {}),
+        }),
       )
         .then((result) => {
           if (active) {
@@ -135,7 +147,7 @@ export function CheckoutPage({ locale, customerName, customerEmail }: Readonly<{
       active = false;
       window.clearTimeout(timer);
     };
-  }, [form.platformCoupon, reservation, t]);
+  }, [form.platformCoupon, reservation, t, vendorCoupons]);
 
   async function reserve() {
     setError(null);
@@ -146,7 +158,17 @@ export function CheckoutPage({ locale, customerName, customerEmail }: Readonly<{
       setRemaining(result.secondsRemaining);
       setTotal(result.total);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t("auth.requestFailed"));
+      const message = reason instanceof Error ? reason.message : t("auth.requestFailed");
+      try {
+        const latest = await fetchCart();
+        setCart(latest.cart);
+        setTotal(latest.cart.total ?? latest.cart.subtotal);
+      } catch (refreshError) {
+        const refreshMessage = refreshError instanceof Error ? refreshError.message : t("auth.requestFailed");
+        setError(`${message} ${refreshMessage}`);
+        return;
+      }
+      setError(message);
     }
   }
 
@@ -164,6 +186,11 @@ export function CheckoutPage({ locale, customerName, customerEmail }: Readonly<{
         ...form,
         phone: normalizePhone(form.country, form.phone),
         checkoutPhone: normalizePhone(form.country, form.checkoutPhone),
+        vendorCoupons: Object.fromEntries(
+          Object.entries(vendorCoupons)
+            .map(([vendorId, code]) => [vendorId, code.trim()])
+            .filter(([, code]) => Boolean(code)),
+        ),
         reservationId: reservation.reservationId,
         idempotencyKey: crypto.randomUUID(),
         recaptchaToken,
@@ -300,8 +327,12 @@ export function CheckoutPage({ locale, customerName, customerEmail }: Readonly<{
               <input value={form.platformCoupon} onChange={(event) => {
                 const platformCoupon = event.target.value;
                 setForm((current) => ({ ...current, platformCoupon }));
-                setQuoting(Boolean(reservation && platformCoupon.trim()));
-                if (!platformCoupon.trim() && reservation) setTotal(reservation.total);
+                const hasVendorCoupon = Object.values(vendorCoupons).some((code) => code.trim());
+                setQuoting(Boolean(reservation && (platformCoupon.trim() || hasVendorCoupon)));
+                if (!platformCoupon.trim() && !hasVendorCoupon && reservation) {
+                  setTotal(reservation.total);
+                  setError(null);
+                }
               }} className="min-h-11 rounded-xl border border-[#d5dfda] px-3 font-normal" />
             </label>
           </section>
@@ -337,6 +368,24 @@ export function CheckoutPage({ locale, customerName, customerEmail }: Readonly<{
                 </div>
                 <div className="mt-3 flex justify-between text-sm"><span>Vendor subtotal</span><span>${group.subtotal}</span></div>
                 <div className="flex justify-between text-sm text-slate-600"><span>Delivery</span><span>${group.deliveryFee}</span></div>
+                <label className="mt-3 grid gap-1 text-sm font-medium text-slate-700">Vendor coupon (optional)
+                  <input
+                    value={vendorCoupons[group.vendorId] ?? ""}
+                    onChange={(event) => {
+                      const code = event.target.value;
+                      const hasOtherCoupon = Object.entries(vendorCoupons)
+                        .some(([vendorId, currentCode]) => vendorId !== group.vendorId && currentCode.trim());
+                      setVendorCoupons((current) => ({ ...current, [group.vendorId]: code }));
+                      const hasAnyCoupon = Boolean(code.trim() || form.platformCoupon.trim() || hasOtherCoupon);
+                      setQuoting(Boolean(reservation && hasAnyCoupon));
+                      if (!hasAnyCoupon && reservation) {
+                        setTotal(reservation.total);
+                        setError(null);
+                      }
+                    }}
+                    className="min-h-10 rounded-xl border border-[#d5dfda] px-3 font-normal"
+                  />
+                </label>
               </section>
             ))}
           </div>

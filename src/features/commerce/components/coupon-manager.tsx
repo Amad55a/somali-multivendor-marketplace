@@ -164,7 +164,7 @@ function CouponManagerContent({ mode }: { mode: CouponMode }) {
         discountType: form.discountType,
         discountValue,
         minOrderAmount: Number(form.minOrderAmount || 0),
-        totalUsageLimit: form.totalUsageLimit ? Number(form.totalUsageLimit) : undefined,
+        totalUsageLimit: form.totalUsageLimit ? Number(form.totalUsageLimit) : null,
         perCustomerLimit: Number(form.perCustomerLimit || 1),
         startsAt: startDate.toISOString(),
         endsAt: endDate.toISOString(),

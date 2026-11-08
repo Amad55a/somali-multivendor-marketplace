@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import Image from "next/image";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
@@ -158,6 +160,9 @@ export function CustomerProfile({ locale }: Readonly<{ locale: Locale }>) {
                 {profile.hasProfilePhoto && <button type="button" disabled={busy} onClick={() => void removePhoto()} className="min-h-10 justify-self-start text-sm font-semibold text-red-700 disabled:opacity-50">Remove photo</button>}
                 <span className="text-xs text-slate-500">JPEG, PNG, or WebP; 64–6000 px per side, up to 25 megapixels and 5 MB.</span>
               </div>
+            </div>
+            <div className="mt-4 border-t border-slate-100 pt-3">
+              <Link href={`/${locale}/users/${profile.id}`} className="text-xs font-semibold text-[#8b5e08] hover:underline">View your public profile →</Link>
             </div>
           </section>
           <p className="text-xs text-slate-500">{new Date(profile.createdAt).toLocaleDateString(locale)}</p>

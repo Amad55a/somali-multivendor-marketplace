@@ -514,6 +514,13 @@ function summarizePayoutOrders(entries: PayoutOrderEntry[], cutoff: Date, holdMs
   });
 }
 
+/**
+ * Previews all eligible and upcoming vendor payout balances based on the post-delivery hold period.
+ *
+ * @param now Reference timestamp (defaults to current date).
+ * @param holdDays Optional override for the post-delivery settlement hold (dev only, 0-7 days).
+ * @returns Breakdown of eligible amounts, pending orders, and upcoming eligibility dates per vendor.
+ */
 export async function previewPayoutBalances(now = new Date(), holdDays?: number) {
   const holdMs = payoutHoldDuration(holdDays);
   const cutoff = payoutHoldCutoff(now, holdMs);
@@ -609,6 +616,19 @@ export async function previewPayoutBalances(now = new Date(), holdDays?: number)
   };
 }
 
+/**
+ * Compiles and persists a weekly vendor payout batch for eligible settled sub-orders.
+ *
+ * Requirements:
+ * - Orders must be in DELIVERED status.
+ * - Delivered timestamp must be older than the hold cutoff (default 7 days).
+ * - No active return requests or open disputes on the order lines.
+ *
+ * @param actorId Administrator user UUID, or null when invoked by the automated cron runner.
+ * @param now Reference timestamp (defaults to current date).
+ * @param holdDays Optional development override for hold threshold.
+ * @returns Created or updated PayoutBatch record with child vendor payouts.
+ */
 export async function createWeeklyPayoutBatch(actorId: string | null, now = new Date(), holdDays?: number) {
   const periodStart = weekStartUtc(now);
   const baseWeekKey = payoutWeekKey(periodStart);
@@ -1494,6 +1514,18 @@ export async function getVendorFinancialStatement(vendorId: string, filters: Ven
   };
 }
 
+/**
+ * Performs complete financial reconciliation comparing customer-paid delivered orders
+ * against the double-entry general ledger, platform commissions, and vendor payouts.
+ *
+ * Verifies:
+ * - Gross merchandise totals vs recorded SALE ledger entries.
+ * - Calculated commission deductions vs COMMISSION ledger entries.
+ * - Disbursed payouts vs PAYOUT ledger entries.
+ * - Highlights negative vendor balances or unallocated ledger discrepancies.
+ *
+ * @returns Comprehensive platform reconciliation statement with discrepancy reports.
+ */
 export async function getFinancialReconciliation() {
   const [vendorOrders, platformOrders, payouts] = await Promise.all([
     prisma.vendorOrder.findMany({

@@ -40,9 +40,9 @@ export function AdminMarketplaceAnalytics() {
   return (
     <section>
       <h2 className="text-3xl font-bold">Marketplace analytics</h2>
-      <p className="mt-2 text-sm text-slate-600">Successful sales exclude cancelled parent orders. Commission and refunds come from ledger and simulated refund records.</p>
+      <p className="mt-2 text-sm text-slate-600">Gross merchandise sales are pre-discount product subtotals for successfully paid orders; delivery, discounts, and refunds are excluded. Status counts and financial totals use the selected order or transaction date range.</p>
       {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
-      <div className="mt-4 flex gap-3">
+      <div className="mt-4 flex flex-wrap gap-3">
         <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} className="rounded-xl border px-3 py-2" />
         <input type="date" value={to} onChange={(event) => setTo(event.target.value)} className="rounded-xl border px-3 py-2" />
       </div>
@@ -53,7 +53,7 @@ export function AdminMarketplaceAnalytics() {
       </div>
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
         <div className="h-80 rounded-2xl border bg-white p-5">
-          <h3 className="font-bold">Sales by day</h3>
+          <h3 className="font-bold">Gross merchandise sales by day</h3>
           {data.salesByDay.length === 0 ? <p className="py-16 text-center text-sm text-slate-500">No successful sales in this range.</p> : (
             <ResponsiveContainer width="100%" height="90%"><BarChart data={data.salesByDay.map((item) => ({ ...item, total: Number(item.total) }))}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="day" /><YAxis /><Tooltip /><Bar dataKey="total" fill="#123b35" /></BarChart></ResponsiveContainer>
           )}

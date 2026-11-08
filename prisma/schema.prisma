@@ -133,6 +133,7 @@ enum ReturnRequestStatus {
   VENDOR_REJECTED
   RETURN_SHIPPED
   ESCALATED
+  IN_REVIEW
   ADMIN_APPROVED
   ADMIN_REJECTED
   RETURNED
@@ -188,6 +189,86 @@ enum SmsOutboxStatus {
   FAILED_TO_SAVE
 }
 
+enum SupportTicketCategory {
+  ORDERS
+  PAYMENTS
+  DELIVERY
+  RETURNS
+  REFUNDS
+  ACCOUNT
+  PRODUCT_ISSUES
+  SAFETY
+  VENDOR_APPLICATION
+  STORE_PROFILE
+  PRODUCT_LISTING
+  INVENTORY
+  COUPONS
+  COMMISSION_PAYOUTS
+  ACCOUNT_SECURITY
+  OTHER
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_FOR_CUSTOMER
+  WAITING_FOR_VENDOR
+  RESOLVED
+  CLOSED
+}
+
+enum SupportTicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum SupportTicketActivityType {
+  CREATED
+  MESSAGE_ADDED
+  ASSIGNED
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  INTERNAL_NOTE_ADDED
+}
+
+enum SupportEmailEvent {
+  TICKET_CREATED
+  TICKET_RESOLVED
+}
+
+enum SupportEmailDeliveryStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}
+
+enum ConversationMessageType {
+  TEXT
+  PRODUCT
+  ORDER
+  IMAGE
+  SYSTEM
+}
+
+enum CommunicationReportReason {
+  SPAM
+  HARASSMENT
+  FRAUD
+  IMPERSONATION
+  INAPPROPRIATE_CONTENT
+  OTHER
+}
+
+enum CommunicationReportStatus {
+  OPEN
+  INVESTIGATING
+  DISMISSED
+  ACTIONED
+}
+
 // ==========================================
 // 1. USERS
 // ==========================================
@@ -241,6 +322,21 @@ model User {
   paymentAttempts          SimulatedPaymentAttempt[]
   paymentReceipts          PaymentReceipt[]
   smsOutboxMessages        SmsOutboxMessage[]
+  requestedSupportTickets SupportTicket[]         @relation("SupportRequester")
+  assignedSupportTickets  SupportTicket[]         @relation("SupportAssignee")
+  supportMessages         SupportMessage[]        @relation("SupportMessageSender")
+  uploadedSupportFiles    SupportAttachment[]     @relation("SupportAttachmentUploader")
+  supportTicketActivities SupportTicketActivity[] @relation("SupportActivityActor")
+  customerConversations   Conversation[]          @relation("ConversationCustomer")
+  vendorConversations     Conversation[]          @relation("ConversationVendor")
+  conversationMessages    ConversationMessage[]  @relation("ConversationMessageSender")
+  conversationAttachments ConversationAttachment[] @relation("ConversationAttachmentUploader")
+  communicationBlocksGiven CommunicationBlock[]  @relation("CommunicationBlocker")
+  communicationBlocksReceived CommunicationBlock[] @relation("CommunicationBlocked")
+  communicationReportsMade CommunicationReport[] @relation("CommunicationReporter")
+  communicationReportsAgainst CommunicationReport[] @relation("CommunicationReported")
+  communicationReportsReviewed CommunicationReport[] @relation("CommunicationReportReviewer")
+  conversationPresence  ConversationPresence[]
 
   @@unique([id, accountType])
   @@unique([accountType, normalizedEmail])
@@ -426,6 +522,7 @@ model VendorProfile {
   files                  VendorApplicationFile[]
   emailDeliveries        VendorApplicationEmail[]
   changeRequests         VendorProfileChangeRequest[]
+  supportTickets         SupportTicket[]
   submittedAt            DateTime?                 @db.Timestamptz(6)
   reviewedAt             DateTime?                 @db.Timestamptz(6)
   reviewedById           String?                   @db.Uuid
@@ -572,6 +669,8 @@ model Product {
   variants ProductVariant[]
   images   ProductImage[]
   reviews  ProductReview[]
+  supportTickets SupportTicket[]
+  conversationMessages ConversationMessage[]
 
   @@unique([vendorId, slug])
   @@index([status, publishedAt])
@@ -688,6 +787,7 @@ model MarketplaceOrder {
   paymentAttempts SimulatedPaymentAttempt[]
   receipt       PaymentReceipt?
   smsOutboxMessages SmsOutboxMessage[]
+  supportTickets    SupportTicket[]
 
   @@index([customerId, createdAt])
   @@index([status, createdAt])
@@ -856,6 +956,7 @@ model VendorNotification {
   bodySo    String    @db.VarChar(1000)
   entityType String?  @db.VarChar(60)
   entityId  String?   @db.Uuid
+  dedupeKey  String?   @unique @db.VarChar(160)
   href       String?  @db.VarChar(300)
   readAt     DateTime? @db.Timestamptz(6)
   createdAt DateTime  @default(now()) @db.Timestamptz(6)
@@ -876,6 +977,7 @@ model AdminNotification {
   href       String?   @db.VarChar(300)
   entityType String?   @db.VarChar(60)
   entityId   String?   @db.Uuid
+  dedupeKey  String?   @unique @db.VarChar(160)
   readAt     DateTime? @db.Timestamptz(6)
   createdAt  DateTime  @default(now()) @db.Timestamptz(6)
 
@@ -892,6 +994,7 @@ model CustomerNotification {
   bodySo     String    @db.VarChar(1000)
   entityType String?   @db.VarChar(60)
   entityId   String?   @db.Uuid
+  dedupeKey  String?   @unique @db.VarChar(160)
   href       String?   @db.VarChar(300)
   readAt     DateTime? @db.Timestamptz(6)
   createdAt  DateTime  @default(now()) @db.Timestamptz(6)
@@ -900,6 +1003,130 @@ model CustomerNotification {
 
   @@index([customerId, readAt, createdAt])
   @@map("customer_notifications")
+}
+
+model SupportTicket {
+  id              String                @id @default(uuid()) @db.Uuid
+  reference       String                @unique @db.VarChar(32)
+  requesterId     String                @db.Uuid
+  requesterRole   AccountType
+  requesterLocale String                @default("en") @db.VarChar(2)
+  subject         String                @db.VarChar(200)
+  description     String                @db.VarChar(4000)
+  category        SupportTicketCategory
+  priority        SupportTicketPriority @default(NORMAL)
+  status          SupportTicketStatus   @default(OPEN)
+  assignedToId    String?               @db.Uuid
+  relatedOrderId  String?               @db.Uuid
+  vendorProfileId String?               @db.Uuid
+  productId       String?               @db.Uuid
+  idempotencyKey  String?               @db.VarChar(80)
+  resolvedAt      DateTime?             @db.Timestamptz(6)
+  closedAt        DateTime?             @db.Timestamptz(6)
+  createdAt       DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime              @updatedAt @db.Timestamptz(6)
+
+  requester     User                    @relation("SupportRequester", fields: [requesterId, requesterRole], references: [id, accountType], onDelete: Cascade)
+  assignedTo    User?                   @relation("SupportAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  relatedOrder  MarketplaceOrder?       @relation(fields: [relatedOrderId], references: [id], onDelete: SetNull)
+  vendorProfile VendorProfile?          @relation(fields: [vendorProfileId], references: [id], onDelete: SetNull)
+  product       Product?                @relation(fields: [productId], references: [id], onDelete: SetNull)
+  messages      SupportMessage[]
+  activities    SupportTicketActivity[]
+  emailDeliveries SupportEmailDelivery[]
+
+  @@unique([requesterId, idempotencyKey])
+  @@index([requesterId, requesterRole, updatedAt])
+  @@index([requesterRole, status, priority, updatedAt])
+  @@index([assignedToId, status, updatedAt])
+  @@index([relatedOrderId])
+  @@index([vendorProfileId])
+  @@index([productId])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id              String      @id @default(uuid()) @db.Uuid
+  ticketId        String      @db.Uuid
+  senderId        String      @db.Uuid
+  senderRole      AccountType
+  content         String      @db.VarChar(4000)
+  internalNote    Boolean     @default(false)
+  idempotencyKey  String?     @db.VarChar(80)
+  requesterReadAt DateTime?   @db.Timestamptz(6)
+  staffReadAt     DateTime?   @db.Timestamptz(6)
+  createdAt       DateTime    @default(now()) @db.Timestamptz(6)
+
+  ticket      SupportTicket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  sender      User                @relation("SupportMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  attachments SupportAttachment[]
+
+  @@unique([senderId, idempotencyKey])
+  @@index([ticketId, createdAt])
+  @@index([ticketId, internalNote, createdAt])
+  @@index([ticketId, senderRole, requesterReadAt, staffReadAt])
+  @@map("support_messages")
+}
+
+model SupportAttachment {
+  id             String   @id @default(uuid()) @db.Uuid
+  messageId      String   @db.Uuid
+  storageKey     String   @unique @db.VarChar(500)
+  originalName   String   @db.VarChar(255)
+  mimeType       String   @db.VarChar(100)
+  sizeBytes      Int
+  uploadedById   String   @db.Uuid
+  idempotencyKey String?  @db.VarChar(80)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  message    SupportMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  uploadedBy User           @relation("SupportAttachmentUploader", fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  @@unique([uploadedById, idempotencyKey])
+  @@index([messageId, createdAt])
+  @@index([uploadedById, createdAt])
+  @@map("support_attachments")
+}
+
+model SupportTicketActivity {
+  id        String                    @id @default(uuid()) @db.Uuid
+  ticketId  String                    @db.Uuid
+  actorId   String?                   @db.Uuid
+  actorRole AccountType?
+  type      SupportTicketActivityType
+  metadata  Json?
+  createdAt DateTime                  @default(now()) @db.Timestamptz(6)
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actor  User?         @relation("SupportActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+  emailDelivery SupportEmailDelivery?
+
+  @@index([ticketId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("support_ticket_activities")
+}
+
+model SupportEmailDelivery {
+  id              String                    @id @default(uuid()) @db.Uuid
+  ticketId        String                    @db.Uuid
+  activityId      String                    @unique @db.Uuid
+  event           SupportEmailEvent
+  status          SupportEmailDeliveryStatus @default(PENDING)
+  recipientEmail  String                    @db.VarChar(254)
+  locale          String                    @default("en") @db.VarChar(2)
+  attemptCount    Int                       @default(0)
+  lastAttemptAt   DateTime?                 @db.Timestamptz(6)
+  lastError       String?                   @db.VarChar(120)
+  sentAt          DateTime?                 @db.Timestamptz(6)
+  createdAt       DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime                  @updatedAt @db.Timestamptz(6)
+
+  ticket   SupportTicket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  activity SupportTicketActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@index([status, lastAttemptAt])
+  @@map("support_email_deliveries")
 }
 
 model VendorDeliveryRule {
@@ -1025,6 +1252,7 @@ model ReturnRequest {
   vendorNote    String?             @db.VarChar(1000)
   returnInstructions String?        @db.VarChar(1000)
   adminNote     String?             @db.VarChar(1000)
+  disputeResolution String?         @db.VarChar(40)
   reviewedByVendorAt DateTime?      @db.Timestamptz(6)
   reviewedByAdminAt  DateTime?      @db.Timestamptz(6)
   reviewedByAdminId  String?        @db.Uuid
@@ -1042,11 +1270,29 @@ model ReturnRequest {
   vendor    User             @relation("ReturnVendor", fields: [vendorId], references: [id], onDelete: Restrict)
   admin     User?            @relation("ReturnAdmin", fields: [reviewedByAdminId], references: [id], onDelete: SetNull)
   refund    SimulatedRefund?
+  disputeUpdates ReturnDisputeUpdate[]
 
   @@index([orderLineId, status])
   @@index([vendorId, status, createdAt])
   @@index([customerId, createdAt])
   @@map("return_requests")
+}
+
+model ReturnDisputeUpdate {
+  id              String   @id @default(uuid()) @db.Uuid
+  returnRequestId String   @db.Uuid
+  authorRole      AccountType
+  audience        String   @db.VarChar(20)
+  kind            String   @db.VarChar(40)
+  content         String   @db.VarChar(2000)
+  requestedFrom   String?  @db.VarChar(20)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+
+  returnRequest ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([returnRequestId, createdAt])
+  @@index([returnRequestId, audience, createdAt])
+  @@map("return_dispute_updates")
 }
 
 model SimulatedRefund {
@@ -1207,4 +1453,122 @@ model PayoutAllocation {
   @@index([ledgerEntryId, releasedAt])
   @@index([payoutId, releasedAt])
   @@map("payout_allocations")
+}
+
+model Conversation {
+  id         String   @id @default(uuid()) @db.Uuid
+  customerId String   @db.Uuid
+  vendorId   String   @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+
+  customer User                    @relation("ConversationCustomer", fields: [customerId], references: [id], onDelete: Cascade)
+  vendor   User                    @relation("ConversationVendor", fields: [vendorId], references: [id], onDelete: Cascade)
+  messages ConversationMessage[]
+  blocks   CommunicationBlock[]
+  reports  CommunicationReport[]
+  presence ConversationPresence[]
+
+  @@unique([customerId, vendorId])
+  @@index([customerId, updatedAt])
+  @@index([vendorId, updatedAt])
+  @@map("conversations")
+}
+
+model ConversationMessage {
+  id              String                  @id @default(uuid()) @db.Uuid
+  conversationId  String                  @db.Uuid
+  senderId        String                  @db.Uuid
+  type            ConversationMessageType @default(TEXT)
+  content         String?                 @db.VarChar(4000)
+  productId       String?                 @db.Uuid
+  attachmentData  Json?
+  clientMessageId String                  @db.VarChar(80)
+  deliveredAt     DateTime?               @db.Timestamptz(6)
+  readAt          DateTime?               @db.Timestamptz(6)
+  createdAt       DateTime                @default(now()) @db.Timestamptz(6)
+
+  conversation Conversation            @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User                    @relation("ConversationMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  product      Product?                @relation(fields: [productId], references: [id], onDelete: SetNull)
+  attachments  ConversationAttachment[]
+
+  @@unique([conversationId, senderId, clientMessageId])
+  @@unique([conversationId, productId])
+  @@index([conversationId, createdAt])
+  @@index([conversationId, senderId, readAt, createdAt])
+  @@map("conversation_messages")
+}
+
+model ConversationAttachment {
+  id           String   @id @default(uuid()) @db.Uuid
+  messageId    String   @db.Uuid
+  uploadedById String   @db.Uuid
+  storageKey   String   @unique @db.VarChar(500)
+  originalName String   @db.VarChar(255)
+  mimeType     String   @db.VarChar(100)
+  sizeBytes    Int
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  message    ConversationMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  uploadedBy User                @relation("ConversationAttachmentUploader", fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  @@index([messageId, createdAt])
+  @@map("conversation_attachments")
+}
+
+model CommunicationBlock {
+  id          String   @id @default(uuid()) @db.Uuid
+  blockerId   String   @db.Uuid
+  blockedId   String   @db.Uuid
+  conversationId String? @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  blocker      User          @relation("CommunicationBlocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked      User          @relation("CommunicationBlocked", fields: [blockedId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId, createdAt])
+  @@index([conversationId])
+  @@map("communication_blocks")
+}
+
+model CommunicationReport {
+  id              String                     @id @default(uuid()) @db.Uuid
+  conversationId  String                     @db.Uuid
+  reporterId      String                     @db.Uuid
+  reportedUserId  String                     @db.Uuid
+  reason          CommunicationReportReason
+  explanation     String?                    @db.VarChar(2000)
+  status          CommunicationReportStatus  @default(OPEN)
+  decisionReason  String?                    @db.VarChar(1000)
+  reviewedById    String?                    @db.Uuid
+  reviewedAt      DateTime?                  @db.Timestamptz(6)
+  createdAt       DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime                   @updatedAt @db.Timestamptz(6)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  reporter     User         @relation("CommunicationReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedUser User         @relation("CommunicationReported", fields: [reportedUserId], references: [id], onDelete: Cascade)
+  reviewedBy   User?        @relation("CommunicationReportReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@unique([conversationId, reporterId, reportedUserId])
+  @@index([status, createdAt])
+  @@index([reportedUserId, status, createdAt])
+  @@map("communication_reports")
+}
+
+model ConversationPresence {
+  conversationId String   @db.Uuid
+  userId         String   @db.Uuid
+  lastSeenAt     DateTime @default(now()) @db.Timestamptz(6)
+  heartbeatAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId, heartbeatAt])
+  @@map("conversation_presence")
 }

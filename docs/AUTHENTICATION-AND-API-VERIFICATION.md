@@ -100,9 +100,10 @@ email OTP, as documented by the endpoint permissions.
 - `POST /admin/users/{userId}/suspend`: deactivates the account, revokes its
   sessions, and records an audit event. Suspended users can be viewed with
   `active=INACTIVE`.
-- `DELETE /admin/users/{userId}`: permanently deletes the account and
-  cascaded account-owned records after recording an audit event. The current
-  administrator cannot suspend or delete themself.
+- `DELETE /admin/users/{userId}`: erases the user's sign-in credentials and
+  identifying profile data, disables the account, and records an audit event.
+  Vendor documents and listings are removed; order and financial history is
+  retained. The current administrator cannot suspend or erase themself.
 - `GET /admin/audit-logs`: paginated audit entries.
 - `GET /admin/vendors/applications`: paginated submitted applications.
 - `GET /admin/vendors/applications/{applicationId}`: application details.

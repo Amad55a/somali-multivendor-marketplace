@@ -149,4 +149,4 @@ Migrations evolve the schema in-place while preserving records. Do not edit or d
 
 ## Not yet implemented
 
-Additional marketplace requirements should be checked against the current schema before implementation. Features not represented there, such as video calls or additional market records, require approved models and migrations; do not treat proposed designs as existing database entities.
+Additional marketplace requirements should be checked against the current schema before implementation. Features not represented there require approved models and migrations; do not treat proposed designs as existing database entities.

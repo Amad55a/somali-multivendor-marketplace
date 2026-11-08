@@ -6,6 +6,7 @@ import {
   BarChart3,
   ClipboardCheck,
   FileText,
+  Headset,
   LayoutDashboard,
   LineChart,
   Bell,
@@ -40,6 +41,8 @@ type AdminSection =
   | "returns"
   | "analytics"
   | "notifications"
+  | "communicationReports"
+  | "support"
   | "smsOutbox"
   | "auditLogs"
   | "settings";
@@ -60,6 +63,8 @@ const icons = {
   returns: RotateCcw,
   analytics: LineChart,
   notifications: Bell,
+  communicationReports: MessageSquareText,
+  support: Headset,
   smsOutbox: MessageSquareText,
   auditLogs: FileText,
   settings: Settings,
@@ -125,7 +130,7 @@ export function AdminSidebar({
     {
       key: "coupons",
       href: `/${locale}/admin/coupons`,
-      label: "Coupons",
+      label: t("admin.navigation.coupons"),
       activePath: `/${locale}/admin/coupons`,
     },
     {
@@ -175,6 +180,18 @@ export function AdminSidebar({
       href: `/${locale}/admin/notifications`,
       label: t("admin.navigation.notifications"),
       activePath: `/${locale}/admin/notifications`,
+    },
+    {
+      key: "support",
+      href: `/${locale}/admin/support`,
+      label: t("support.navLabel"),
+      activePath: `/${locale}/admin/support`,
+    },
+    {
+      key: "communicationReports",
+      href: `/${locale}/admin/communication-reports`,
+      label: t("admin.navigation.communicationReports"),
+      activePath: `/${locale}/admin/communication-reports`,
     },
     {
       key: "smsOutbox",

@@ -21,6 +21,14 @@ describe("OpenAPI contract", () => {
         ?.security,
     ).toEqual([{ sessionCookie: [] }]);
     expect(paths["/api/v1/admin/auth/login"]?.post?.security).toEqual([]);
+    expect(paths["/api/v1/support/availability"]?.get?.security).toEqual([
+      { sessionCookie: [] },
+    ]);
+    expect(
+      paths[
+        "/api/v1/admin/support/tickets/{ticketId}/email-deliveries/{deliveryId}/retry"
+      ]?.post?.security,
+    ).toEqual([{ sessionCookie: [] }]);
     expect(
       paths["/api/v1/admin/vendors/applications/{applicationId}/approve"]?.post
         ?.parameters,

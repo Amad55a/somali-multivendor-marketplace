@@ -328,7 +328,7 @@ export function AdminPayoutManager() {
                 <table className="w-full min-w-[640px] text-left text-sm">
                   <thead className="border-b border-[#edf1ef] text-slate-600"><tr>
                     <th className="pb-3 pe-4">{t("finance.vendorOrder")}</th>
-                    <th className="pb-3 pe-4">Email</th>
+                    <th className="pb-3 pe-4">{t("admin.users.email")}</th>
                     <th className="pb-3 pe-4">{t("finance.coveredOrders")}</th>
                     <th className="pb-3">{t("finance.amount")}</th>
                   </tr></thead>

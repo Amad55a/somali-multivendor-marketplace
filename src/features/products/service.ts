@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { AppError } from "@/lib/errors/app-error";
 import type { AuthenticatedUser } from "@/features/auth/sessions";
 import { assertApprovedVendor } from "@/features/vendors/service";
+import { availableStockForVariants } from "@/features/commerce/inventory";
 import { saveProductImage } from "@/lib/media/vendor-files";
 import type {
   productCreateSchema,
@@ -362,7 +363,6 @@ export async function listPublicProducts(query: ProductQuery) {
             variants: {
               some: {
                 isActive: true,
-                ...(query.inStock ? { stockQuantity: { gt: 0 } } : {}),
                 ...(query.minPrice !== undefined || query.maxPrice !== undefined
                   ? {
                       price: {
@@ -381,8 +381,23 @@ export async function listPublicProducts(query: ProductQuery) {
     take: query.limit,
     ...(query.cursor ? { skip: 1, cursor: { id: query.cursor } } : {}),
   });
-  const metrics = await getProductMetrics(products.map(({ id }) => id));
-  const enriched = products.map((product) => ({
+  const availability = await availableStockForVariants(
+    products.flatMap((product) =>
+      product.variants.map((variant) => ({ id: variant.id, stockQuantity: variant.stockQuantity })),
+    ),
+  );
+  const availableProducts = products.map((product) => ({
+    ...product,
+    variants: product.variants.map((variant) => ({
+      ...variant,
+      stockQuantity: availability.get(variant.id) ?? 0,
+    })),
+  }));
+  const inStockProducts = query.inStock
+    ? availableProducts.filter((product) => product.variants.some((variant) => variant.isActive && variant.stockQuantity > 0))
+    : availableProducts;
+  const metrics = await getProductMetrics(inStockProducts.map(({ id }) => id));
+  const enriched = inStockProducts.map((product) => ({
     ...product,
     ...(metrics.get(product.id) ?? {
       ratingAverage: 0,
@@ -409,14 +424,82 @@ export async function listPublicProducts(query: ProductQuery) {
 export async function getPublicProduct(productId: string) {
   const product = await prisma.product.findFirst({ where: { id: productId, status: "PUBLISHED", vendor: { isActive: true, vendorProfile: { is: { applicationStatus: "APPROVED" } } } }, include: productInclude });
   if (!product) throw new AppError("PRODUCT_NOT_FOUND", 404, "Product not found.");
-  const metrics = await getProductMetrics([product.id]);
+  const [metrics, vendorRating, related] = await Promise.all([
+    getProductMetrics([product.id]),
+    prisma.productReview.aggregate({
+      where: {
+        hiddenAt: null,
+        product: {
+          vendorId: product.vendorId,
+          status: "PUBLISHED",
+          vendor: { isActive: true, vendorProfile: { is: { applicationStatus: "APPROVED" } } },
+        },
+      },
+      _avg: { rating: true },
+      _count: { _all: true },
+    }),
+    prisma.product.findMany({
+      where: {
+        id: { not: product.id },
+        status: "PUBLISHED",
+        vendor: { isActive: true, vendorProfile: { is: { applicationStatus: "APPROVED" } } },
+        OR: [
+          { categoryId: product.categoryId },
+          { vendorId: product.vendorId },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        nameSo: true,
+        variants: {
+          where: { isActive: true },
+          orderBy: { price: "asc" },
+          select: { id: true, price: true, compareAtPrice: true, stockQuantity: true },
+        },
+        images: {
+          orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }],
+          select: { id: true },
+          take: 1,
+        },
+      },
+      take: 6,
+    }),
+  ]);
+
+  const availability = await availableStockForVariants([
+    ...product.variants.map((variant) => ({ id: variant.id, stockQuantity: variant.stockQuantity })),
+    ...related.flatMap((item) =>
+      item.variants.map((variant) => ({ id: variant.id, stockQuantity: variant.stockQuantity })),
+    ),
+  ]);
+  const availableVariants = product.variants.map((variant) => ({
+    ...variant,
+    stockQuantity: availability.get(variant.id) ?? 0,
+  }));
+
   return {
     ...product,
+    variants: availableVariants,
     ...(metrics.get(product.id) ?? {
       ratingAverage: 0,
       reviewCount: 0,
       purchaseCount: 0,
       ratingDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
+    }),
+    vendorRatingAverage: vendorRating._avg.rating ?? 0,
+    vendorReviewCount: vendorRating._count._all,
+    relatedProducts: related.map((item) => {
+      const selected = item.variants.find((variant) => (availability.get(variant.id) ?? 0) > 0) ?? item.variants[0];
+      return {
+        id: item.id,
+        name: item.name,
+        nameSo: item.nameSo,
+        price: selected?.price ? Number(selected.price).toFixed(2) : "0.00",
+        compareAtPrice: selected?.compareAtPrice ? Number(selected.compareAtPrice).toFixed(2) : null,
+        stockQuantity: selected ? availability.get(selected.id) ?? 0 : 0,
+        imageId: item.images[0]?.id ?? null,
+      };
     }),
     reviews: product.reviews.map((review) => ({ ...review, verifiedPurchase: true })),
   };

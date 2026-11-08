@@ -9,6 +9,7 @@ const ROOT = path.join(process.cwd(), ".data", "vendor-files");
 const MAX_LOGO_BYTES = 5 * 1024 * 1024;
 const MAX_LICENSE_BYTES = 10 * 1024 * 1024;
 const MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_SUPPORT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 const allowed = {
   STORE_LOGO: new Set(["image/jpeg", "image/png", "image/webp"]),
@@ -42,32 +43,68 @@ function imageDimensions(mimeType: string, bytes: Uint8Array): { width: number; 
     let offset = 2;
     while (offset + 4 < bytes.length) {
       if (bytes[offset] !== 0xff) break;
-      const marker = bytes[offset + 1] ?? 0;
-      offset += 2;
+      while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+      if (offset >= bytes.length) return null;
+      const marker = bytes[offset] ?? 0;
+      offset += 1;
       if (marker === 0xd8 || marker === 0xd9 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (offset + 2 > bytes.length) return null;
       const segmentLength = view.getUint16(offset);
       if (segmentLength < 2 || offset + segmentLength > bytes.length) return null;
       if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+        if (segmentLength < 7) return null;
         return { height: view.getUint16(offset + 3), width: view.getUint16(offset + 5) };
       }
       offset += segmentLength;
     }
     return null;
   }
-  if (mimeType === "image/webp" && bytes.length >= 30) {
-    const chunk = new TextDecoder().decode(bytes.subarray(12, 16));
-    if (chunk === "VP8X") {
-      const width = 1 + (bytes[24]! | (bytes[25]! << 8) | (bytes[26]! << 16));
-      const height = 1 + (bytes[27]! | (bytes[28]! << 8) | (bytes[29]! << 16));
-      return { width, height };
-    }
-    if (chunk === "VP8 " && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
-      return { width: view.getUint16(26, true) & 0x3fff, height: view.getUint16(28, true) & 0x3fff };
-    }
-    if (chunk === "VP8L" && bytes[20] === 0x2f && bytes.length >= 25) {
-      const width = 1 + bytes[21]! + ((bytes[22]! & 0x3f) << 8);
-      const height = 1 + ((bytes[22]! >> 6) | (bytes[23]! << 2) | ((bytes[24]! & 0x0f) << 10));
-      return { width, height };
+  if (mimeType === "image/webp" && bytes.length >= 12) {
+    let offset = 12;
+    while (offset + 8 <= bytes.length) {
+      const chunk = new TextDecoder().decode(bytes.subarray(offset, offset + 4));
+      const chunkLength = view.getUint32(offset + 4, true);
+      const dataOffset = offset + 8;
+      const chunkEnd = dataOffset + chunkLength;
+      if (chunkEnd > bytes.length) return null;
+
+      if (chunk === "VP8X" && chunkLength >= 10) {
+        const width =
+          1 +
+          (bytes[dataOffset + 4]! |
+            (bytes[dataOffset + 5]! << 8) |
+            (bytes[dataOffset + 6]! << 16));
+        const height =
+          1 +
+          (bytes[dataOffset + 7]! |
+            (bytes[dataOffset + 8]! << 8) |
+            (bytes[dataOffset + 9]! << 16));
+        return { width, height };
+      }
+      if (
+        chunk === "VP8 " &&
+        chunkLength >= 10 &&
+        bytes[dataOffset + 3] === 0x9d &&
+        bytes[dataOffset + 4] === 0x01 &&
+        bytes[dataOffset + 5] === 0x2a
+      ) {
+        return {
+          width: view.getUint16(dataOffset + 6, true) & 0x3fff,
+          height: view.getUint16(dataOffset + 8, true) & 0x3fff,
+        };
+      }
+      if (chunk === "VP8L" && chunkLength >= 5 && bytes[dataOffset] === 0x2f) {
+        const width =
+          1 + bytes[dataOffset + 1]! + ((bytes[dataOffset + 2]! & 0x3f) << 8);
+        const height =
+          1 +
+          ((bytes[dataOffset + 2]! >> 6) |
+            (bytes[dataOffset + 3]! << 2) |
+            ((bytes[dataOffset + 4]! & 0x0f) << 10));
+        return { width, height };
+      }
+
+      offset = chunkEnd + (chunkLength % 2);
     }
   }
   return null;
@@ -83,7 +120,11 @@ function assertImageDimensions(mimeType: string, bytes: Uint8Array) {
     dimensions.height > 6000 ||
     dimensions.width * dimensions.height > 25_000_000
   ) {
-    throw new AppError("INVALID_IMAGE_DIMENSIONS", 400, "The image dimensions are not supported.");
+    throw new AppError(
+      "INVALID_IMAGE_DIMENSIONS",
+      400,
+      "The image format or dimensions are not supported. Use an image at least 64x64 and no larger than 6000x6000 pixels (25 megapixels).",
+    );
   }
 }
 
@@ -134,6 +175,69 @@ export async function saveProductImage(file: File) {
     mimeType: file.type,
     sizeBytes: file.size,
   };
+}
+
+export async function saveSupportAttachment(file: File) {
+  const supportMimeTypes = new Set([
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+  ]);
+  if (
+    !supportMimeTypes.has(file.type) ||
+    file.size === 0 ||
+    file.size > MAX_SUPPORT_ATTACHMENT_BYTES
+  ) {
+    throw new AppError(
+      "INVALID_FILE",
+      400,
+      "Support attachments must be PDF, JPEG, PNG, or WebP files smaller than 10 MB.",
+    );
+  }
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!contentMatches(file.type, bytes)) {
+    throw new AppError(
+      "INVALID_FILE_CONTENT",
+      400,
+      "The uploaded file content does not match its type.",
+    );
+  }
+
+  const storageKey = `${randomUUID()}${extension(file.type)}`;
+  const originalName =
+    file.name
+      .replace(/[\\/\u0000-\u001f\u007f]/g, "_")
+      .trim()
+      .slice(0, 255) || "attachment";
+  await mkdir(ROOT, { recursive: true });
+  await writeFile(path.join(ROOT, storageKey), bytes, { flag: "wx" });
+  return {
+    storageKey,
+    originalName,
+    mimeType: file.type,
+    sizeBytes: file.size,
+  };
+}
+
+export async function readSupportAttachment(storageKey: string) {
+  if (!/^[\da-f-]{36}\.(?:jpg|png|webp|pdf)$/i.test(storageKey)) {
+    throw new AppError("FILE_NOT_FOUND", 404, "File not found.");
+  }
+  try {
+    return await readFile(path.join(ROOT, storageKey));
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new AppError("FILE_NOT_FOUND", 404, "File not found.");
+    }
+    throw error;
+  }
 }
 
 export async function readVendorFile(storageKey: string) {

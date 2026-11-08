@@ -5,6 +5,8 @@ import { z } from "zod";
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { requestApi } from "@/lib/api/client";
 import { useTranslation } from "@/i18n/hooks/use-translation";
+import { useLocaleContext } from "@/i18n/locale-provider";
+import { vendorOrderStatusTranslationKey } from "@/features/vendors/order-status";
 import { useVisiblePolling } from "@/lib/hooks/use-visible-polling";
 
 const schema = z.object({
@@ -31,14 +33,15 @@ const schema = z.object({
 
 const colors = ["#123b35", "#f4b942", "#4d8b78", "#d97706", "#7c3aed"];
 
-function formatTotals(totals: Array<{ currency: string; amount: string }>) {
+function formatTotals(totals: Array<{ currency: string; amount: string }>, locale: string) {
   return totals
-    .map(({ currency, amount }) => new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(amount)))
+    .map(({ currency, amount }) => new Intl.NumberFormat(locale, { style: "currency", currency }).format(Number(amount)))
     .join(" · ") || "—";
 }
 
 export function VendorSalesAnalytics() {
   const { t } = useTranslation();
+  const { locale } = useLocaleContext();
   const [data, setData] = useState<z.infer<typeof schema> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadAnalytics = useCallback(async () => {
@@ -71,21 +74,21 @@ export function VendorSalesAnalytics() {
         ] as const).map(([label, totals]) => (
           <div key={label} className="rounded-2xl border border-[#e1e9e5] bg-white p-5">
             <p className="text-sm text-slate-600">{label}</p>
-            <p className="mt-2 text-2xl font-bold text-[#123b35]">{formatTotals(totals)}</p>
+            <p className="mt-2 text-2xl font-bold text-[#123b35]">{formatTotals(totals, locale === "so" ? "so-SO" : "en-US")}</p>
           </div>
         ))}
         <div className="rounded-2xl border border-[#e1e9e5] bg-white p-5">
-          <p className="text-sm text-slate-600">Paid orders</p>
+          <p className="text-sm text-slate-600">{t("vendor.paidOrders")}</p>
           <p className="mt-2 text-3xl font-bold">{data.totalOrders}</p>
         </div>
         <div className="rounded-2xl border border-[#e1e9e5] bg-white p-5">
-          <p className="text-sm text-slate-600">Average product sales per order</p>
+          <p className="text-sm text-slate-600">{t("vendor.averageOrderValue")}</p>
           <p className="mt-2 text-3xl font-bold">${data.averageOrderValue}</p>
         </div>
       </div>
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
         <div className="rounded-2xl border border-[#e1e9e5] bg-white p-5">
-          <h3 className="font-bold">Top selling products</h3>
+          <h3 className="font-bold">{t("vendor.topSellingProducts")}</h3>
           {data.topProducts.length === 0 ? <p className="py-12 text-center text-sm text-slate-500">{t("vendor.noCatalogData")}</p> : (
             <div className="mt-5 h-72">
               <ResponsiveContainer width="100%" height="100%">
@@ -101,12 +104,12 @@ export function VendorSalesAnalytics() {
           )}
         </div>
         <div className="rounded-2xl border border-[#e1e9e5] bg-white p-5">
-          <h3 className="font-bold">Order status</h3>
+          <h3 className="font-bold">{t("vendor.orderStatus")}</h3>
           {data.statusCounts.length === 0 ? <p className="py-12 text-center text-sm text-slate-500">{t("vendor.noOrdersTitle")}</p> : (
             <div className="mt-5 h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={data.statusCounts} dataKey="count" nameKey="status" innerRadius={62} outerRadius={94} paddingAngle={4}>
+                  <Pie data={data.statusCounts.map((item) => ({ ...item, status: t(vendorOrderStatusTranslationKey(item.status)) }))} dataKey="count" nameKey="status" innerRadius={62} outerRadius={94} paddingAngle={4}>
                     {data.statusCounts.map((item, index) => <Cell key={item.status} fill={colors[index % colors.length]} />)}
                   </Pie>
                   <Tooltip />

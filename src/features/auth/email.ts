@@ -44,6 +44,46 @@ export function assertEmailDeliveryConfigured(): void {
   getEmailDeliveryConfig();
 }
 
+export async function sendSupportEmailMessage(message: {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}): Promise<void> {
+  const config = getEmailDeliveryConfig();
+  const transporter = nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure: config.port === 465,
+    requireTLS: config.port !== 465,
+    auth: { user: config.user, pass: config.password },
+  });
+
+  try {
+    const result = await transporter.sendMail({
+      from: config.from,
+      to: message.to,
+      subject: message.subject,
+      text: message.text,
+      html: message.html,
+    });
+    if (result.accepted.length === 0) {
+      throw new Error("Email provider did not accept the message.");
+    }
+  } catch (error) {
+    console.error("[support-email] Delivery failed", {
+      errorName: error instanceof Error ? error.name : "Unknown",
+      ...(isSafeSmtpCode(error) ? { smtpCode: error.code } : {}),
+      ...(isSafeSmtpResponseCode(error) ? { smtpResponseCode: error.responseCode } : {}),
+    });
+    throw new AppError(
+      "EMAIL_DELIVERY_UNAVAILABLE",
+      503,
+      "Email delivery is temporarily unavailable.",
+    );
+  }
+}
+
 export async function sendOneTimeCode(
   email: string,
   code: string,

@@ -37,10 +37,10 @@ export function VendorInventoryTable({ variants }: Readonly<{ variants: Variant[
       <h2 className="text-3xl font-bold">{t("vendor.inventoryTitle")}</h2>
       <p className="mt-2 text-sm text-slate-600">{t("vendor.inventoryDescription")}</p>
       <div className="mt-4 flex flex-wrap gap-2">
-        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("vendor.searchPlaceholder")} className="rounded-xl border px-3 py-2" />
-        <button type="button" onClick={() => setFilter("all")} className="rounded-xl border px-3 py-2 text-sm font-semibold">All</button>
-        <button type="button" onClick={() => setFilter("low")} className="rounded-xl border px-3 py-2 text-sm font-semibold">{t("vendor.stockLow")}</button>
-        <button type="button" onClick={() => setFilter("out")} className="rounded-xl border px-3 py-2 text-sm font-semibold">{t("vendor.stockOut")}</button>
+        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("vendor.searchPlaceholder")} className="min-h-11 w-full rounded-xl border px-3 py-2 sm:w-auto" />
+        <button type="button" onClick={() => setFilter("all")} className="min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold">{t("vendor.allStatuses")}</button>
+        <button type="button" onClick={() => setFilter("low")} className="min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold">{t("vendor.stockLow")}</button>
+        <button type="button" onClick={() => setFilter("out")} className="min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold">{t("vendor.stockOut")}</button>
       </div>
       <div className="mt-6 overflow-x-auto rounded-2xl border border-[#e1e9e5] bg-white shadow-sm">
         <table className="w-full min-w-[640px] text-left text-sm">

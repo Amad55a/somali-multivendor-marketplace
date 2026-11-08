@@ -185,6 +185,33 @@ describe("paid vendor order ledger", () => {
     });
   });
 
+  it("records vendor-funded coupon discounts separately from gross sale proceeds", async () => {
+    const tx = {
+      vendorOrder: {
+        findUnique: vi.fn().mockResolvedValue(paidVendorOrder({
+          discountAmount: new Prisma.Decimal("3.00"),
+          couponRedemptions: [{ couponId: "vendor-coupon-1" }],
+        })),
+      },
+      ledgerEntry: { createMany: vi.fn().mockResolvedValue({ count: 3 }) },
+    };
+
+    await recordPaidVendorOrderLedger(tx as never, "vendor-order-1");
+
+    expect(tx.ledgerEntry.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.arrayContaining([
+        expect.objectContaining({ type: "SALE", amount: new Prisma.Decimal("8.00") }),
+        expect.objectContaining({
+          type: "VENDOR_DISCOUNT",
+          amount: new Prisma.Decimal("-3.00"),
+          couponId: "vendor-coupon-1",
+          idempotencyKey: "VENDOR_DISCOUNT:vendor-order-1",
+        }),
+      ]),
+      skipDuplicates: true,
+    }));
+  });
+
   it("posts each vendor's commission separately for a multi-vendor parent order", async () => {
     const orders = new Map([
       ["vendor-order-1", paidVendorOrder()],

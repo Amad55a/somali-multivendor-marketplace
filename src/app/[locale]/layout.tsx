@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 import { notFound } from "next/navigation";
 import { Geist } from "next/font/google";
 import { LocaleProvider } from "@/i18n/locale-provider";
@@ -55,7 +55,9 @@ export default async function LocaleLayout({
     >
       <body className="min-h-full">
         <LocaleProvider locale={localeParam} dictionary={dictionary}>
-          <LiveRouteRefresh />
+          <Suspense fallback={null}>
+            <LiveRouteRefresh />
+          </Suspense>
           {children}
         </LocaleProvider>
       </body>

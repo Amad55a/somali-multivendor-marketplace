@@ -3,7 +3,13 @@ import { Prisma } from "../../../generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { AppError } from "@/lib/errors/app-error";
 import type { AuthenticatedUser } from "@/features/auth/sessions";
-import { availableStock, expireReservations, refundVendorOrder, refundVendorOrderInTransaction } from "@/features/commerce/marketplace-workflow";
+import { refundVendorOrder, refundVendorOrderInTransaction } from "@/features/commerce/marketplace-workflow";
+import {
+  availableStockForVariants,
+  availableStockInTransaction,
+  expireReservations,
+  lockInventoryVariants,
+} from "@/features/commerce/inventory";
 import { getVendorFinancialStatement, recordDeliveryLedger } from "@/features/commerce/financial-service";
 import { bilingualSms, smsOutboxAdapter } from "@/features/commerce/sms-outbox-adapter";
 
@@ -17,30 +23,6 @@ function money(value: Prisma.Decimal | string | number) {
   return new Prisma.Decimal(value).toFixed(2);
 }
 
-async function eligibleVariant(variantId: string) {
-  const variant = await prisma.productVariant.findFirst({
-    where: {
-      id: variantId,
-      isActive: true,
-      product: {
-        status: "PUBLISHED",
-        vendor: { isActive: true, vendorProfile: { is: { applicationStatus: "APPROVED" } } },
-      },
-    },
-    include: {
-      product: {
-        include: {
-          vendor: { select: { id: true } },
-          images: { orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }], take: 1, select: { id: true } },
-          category: { select: { name: true, nameSo: true, slug: true, parentId: true } },
-        },
-      },
-    },
-  });
-  if (!variant) throw new AppError("VARIANT_UNAVAILABLE", 404, "This product variant is not available.");
-  return variant;
-}
-
 export async function resolveCart(user: AuthenticatedUser | null, guestKey: string | null) {
   if (user) {
     let cart = await prisma.shoppingCart.findUnique({ where: { userId: user.id }, include: cartInclude });
@@ -51,20 +33,72 @@ export async function resolveCart(user: AuthenticatedUser | null, guestKey: stri
       const guest = await prisma.shoppingCart.findUnique({ where: { guestKey }, include: { items: true } });
       if (guest && guest.id !== cart.id) {
         await prisma.$transaction(async (tx) => {
-          for (const item of guest.items) {
+          for (const cartId of [cart!.id, guest.id].sort()) {
+            await tx.$queryRaw`SELECT "id" FROM "shopping_carts" WHERE "id" = ${cartId}::uuid FOR UPDATE`;
+          }
+          const [currentCart, currentGuest] = await Promise.all([
+            tx.shoppingCart.findUnique({ where: { id: cart!.id }, include: { items: true } }),
+            tx.shoppingCart.findUnique({ where: { id: guest.id }, include: { items: true } }),
+          ]);
+          if (!currentCart || !currentGuest) return;
+          const variantIds = currentGuest.items.map((item) => item.variantId);
+          await lockInventoryVariants(tx, variantIds);
+          for (const item of currentGuest.items) {
             const existing = await tx.cartItem.findUnique({
-              where: { cartId_variantId: { cartId: cart!.id, variantId: item.variantId } },
+              where: { cartId_variantId: { cartId: currentCart.id, variantId: item.variantId } },
             });
+            const quantity = (existing?.quantity ?? 0) + item.quantity;
+            const variant = await tx.productVariant.findUnique({
+              where: { id: item.variantId },
+              select: {
+                stockQuantity: true,
+                isActive: true,
+                product: {
+                  select: {
+                    status: true,
+                    vendor: {
+                      select: {
+                        isActive: true,
+                        vendorProfile: { select: { applicationStatus: true } },
+                      },
+                    },
+                  },
+                },
+              },
+            });
+            if (
+              !variant?.isActive ||
+              variant.product.status !== "PUBLISHED" ||
+              !variant.product.vendor.isActive ||
+              variant.product.vendor.vendorProfile?.applicationStatus !== "APPROVED"
+            ) {
+              throw new AppError("VARIANT_UNAVAILABLE", 404, "This product variant is not available.");
+            }
+            const available = await availableStockInTransaction(
+              tx,
+              item.variantId,
+              variant.stockQuantity,
+              { exceptCustomerId: user.id },
+            );
+            if (quantity > available) {
+              throw new AppError(
+                available === 0 ? "OUT_OF_STOCK" : "INSUFFICIENT_STOCK",
+                409,
+                available === 0
+                  ? "This variant is out of stock."
+                  : `Only ${available} units are available.`,
+              );
+            }
             if (existing) {
               await tx.cartItem.update({
                 where: { id: existing.id },
-                data: { quantity: existing.quantity + item.quantity },
+                data: { quantity },
               });
             } else {
-              await tx.cartItem.create({ data: { cartId: cart!.id, variantId: item.variantId, quantity: item.quantity, capturedPrice: item.capturedPrice } });
+              await tx.cartItem.create({ data: { cartId: currentCart.id, variantId: item.variantId, quantity: item.quantity, capturedPrice: item.capturedPrice } });
             }
           }
-          await tx.shoppingCart.delete({ where: { id: guest.id } });
+          await tx.shoppingCart.delete({ where: { id: currentGuest.id } });
         });
         cart = await prisma.shoppingCart.findUniqueOrThrow({ where: { id: cart.id }, include: cartInclude });
       }
@@ -95,8 +129,15 @@ const cartInclude = {
 
 export async function serializeCart(cart: Prisma.ShoppingCartGetPayload<{ include: typeof cartInclude }> | null) {
   const items = [];
+  const availability = await availableStockForVariants(
+    (cart?.items ?? []).map((item) => ({
+      id: item.variantId,
+      stockQuantity: item.variant.stockQuantity,
+    })),
+    cart?.userId ? { exceptCustomerId: cart.userId } : {},
+  );
   for (const item of cart?.items ?? []) {
-    const available = await availableStock(item.variantId, item.variant.stockQuantity);
+    const available = availability.get(item.variantId) ?? 0;
     const price = money(item.variant.price);
     const captured = money(item.capturedPrice);
     const line = new Prisma.Decimal(item.variant.price).mul(item.quantity);
@@ -162,11 +203,6 @@ export async function addToCart(
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
     throw new AppError("INVALID_QUANTITY", 400, "Quantity must be between 1 and 99.");
   }
-  const variant = await eligibleVariant(variantId);
-  const sellable = await availableStock(variant.id, variant.stockQuantity);
-  if (sellable < 1) {
-    throw new AppError("OUT_OF_STOCK", 409, "This variant is out of stock.");
-  }
   let cart = await resolveCart(user, guestKey);
   if (!cart) {
     cart = await prisma.shoppingCart.create({
@@ -174,16 +210,43 @@ export async function addToCart(
       include: cartInclude,
     });
   }
-  const existing = cart.items.find((item) => item.variantId === variantId);
-  const nextQuantity = (existing?.quantity ?? 0) + quantity;
-  if (nextQuantity > sellable) {
-    throw new AppError("INSUFFICIENT_STOCK", 409, "Requested quantity exceeds available stock.");
-  }
-  if (existing) {
-    await prisma.cartItem.update({ where: { id: existing.id }, data: { quantity: nextQuantity } });
-  } else {
-    await prisma.cartItem.create({ data: { cartId: cart.id, variantId, quantity, capturedPrice: variant.price } });
-  }
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "shopping_carts" WHERE "id" = ${cart.id}::uuid FOR UPDATE`;
+    await lockInventoryVariants(tx, [variantId]);
+    const variant = await tx.productVariant.findFirst({
+      where: {
+        id: variantId,
+        isActive: true,
+        product: {
+          status: "PUBLISHED",
+          vendor: { isActive: true, vendorProfile: { is: { applicationStatus: "APPROVED" } } },
+        },
+      },
+      select: { id: true, stockQuantity: true, price: true },
+    });
+    if (!variant) throw new AppError("VARIANT_UNAVAILABLE", 404, "This product variant is not available.");
+    const existing = await tx.cartItem.findUnique({
+      where: { cartId_variantId: { cartId: cart.id, variantId } },
+    });
+    const nextQuantity = (existing?.quantity ?? 0) + quantity;
+    const available = await availableStockInTransaction(
+      tx,
+      variant.id,
+      variant.stockQuantity,
+      user ? { exceptCustomerId: user.id } : {},
+    );
+    if (available < 1) {
+      throw new AppError("OUT_OF_STOCK", 409, "This variant is out of stock.");
+    }
+    if (nextQuantity > available) {
+      throw new AppError("INSUFFICIENT_STOCK", 409, `Only ${available} units are available.`);
+    }
+    if (existing) {
+      await tx.cartItem.update({ where: { id: existing.id }, data: { quantity: nextQuantity } });
+    } else {
+      await tx.cartItem.create({ data: { cartId: cart.id, variantId, quantity, capturedPrice: variant.price } });
+    }
+  });
   const updated = await prisma.shoppingCart.findUniqueOrThrow({ where: { id: cart.id }, include: cartInclude });
   return { cart: await serializeCart(updated), guestKey: updated.guestKey };
 }
@@ -199,15 +262,40 @@ export async function updateCartItem(
   const item = cart.items.find((entry) => entry.id === itemId);
   if (!item) throw new AppError("CART_ITEM_NOT_FOUND", 404, "Cart item was not found.");
   if (quantity === 0) {
-    await prisma.cartItem.delete({ where: { id: itemId } });
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "shopping_carts" WHERE "id" = ${cart.id}::uuid FOR UPDATE`;
+      await tx.cartItem.deleteMany({ where: { id: itemId, cartId: cart.id } });
+    });
   } else {
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
       throw new AppError("INVALID_QUANTITY", 400, "Quantity must be between 1 and 99.");
     }
-    if (quantity > await availableStock(item.variantId, item.variant.stockQuantity)) {
-      throw new AppError("INSUFFICIENT_STOCK", 409, "Requested quantity exceeds available stock.");
-    }
-    await prisma.cartItem.update({ where: { id: itemId }, data: { quantity } });
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "shopping_carts" WHERE "id" = ${cart.id}::uuid FOR UPDATE`;
+      await lockInventoryVariants(tx, [item.variantId]);
+      const currentItem = await tx.cartItem.findFirst({
+        where: { id: itemId, cartId: cart.id },
+        include: { variant: { select: { stockQuantity: true, isActive: true, product: { select: { status: true } } } } },
+      });
+      if (!currentItem) throw new AppError("CART_ITEM_NOT_FOUND", 404, "Cart item was not found.");
+      if (!currentItem.variant.isActive || currentItem.variant.product.status !== "PUBLISHED") {
+        throw new AppError("VARIANT_UNAVAILABLE", 409, "This product variant is not available.");
+      }
+      const available = await availableStockInTransaction(
+        tx,
+        item.variantId,
+        currentItem.variant.stockQuantity,
+        user ? { exceptCustomerId: user.id } : {},
+      );
+      if (quantity > available) {
+        throw new AppError(
+          available === 0 ? "OUT_OF_STOCK" : "INSUFFICIENT_STOCK",
+          409,
+          available === 0 ? "This variant is out of stock." : `Only ${available} units are available.`,
+        );
+      }
+      await tx.cartItem.update({ where: { id: itemId }, data: { quantity } });
+    });
   }
   const updated = await prisma.shoppingCart.findUniqueOrThrow({ where: { id: cart.id }, include: cartInclude });
   return { cart: await serializeCart(updated) };
@@ -244,8 +332,16 @@ const orderInclude = {
               photoKey: true,
               vendorNote: true,
               returnInstructions: true,
+              adminNote: true,
+              disputeResolution: true,
+              reviewedByAdminAt: true,
               returnShipmentNote: true,
               createdAt: true,
+              disputeUpdates: {
+                where: { audience: { in: ["BOTH", "CUSTOMER"] } },
+                orderBy: { createdAt: "asc" },
+                select: { id: true, authorRole: true, kind: true, content: true, requestedFrom: true, createdAt: true },
+              },
               refund: { select: { id: true, amount: true, simulated: true, createdAt: true } },
             },
             orderBy: { createdAt: "desc" as const },
@@ -346,6 +442,13 @@ function serializeOrder(order: Prisma.MarketplaceOrderGetPayload<{ include: type
           photoKey: request.photoKey,
           vendorNote: request.vendorNote,
           returnInstructions: request.returnInstructions,
+          adminNote: request.adminNote,
+          disputeResolution: request.disputeResolution,
+          reviewedByAdminAt: request.reviewedByAdminAt?.toISOString() ?? null,
+          disputeUpdates: request.disputeUpdates.map((update) => ({
+            ...update,
+            createdAt: update.createdAt.toISOString(),
+          })),
           returnShipmentNote: request.returnShipmentNote,
           createdAt: request.createdAt.toISOString(),
           refund: request.refund ? {
@@ -700,34 +803,69 @@ export async function updateVendorStock(user: AuthenticatedUser, variantId: stri
   if (!Number.isInteger(stockQuantity) || stockQuantity < 0) {
     throw new AppError("INVALID_STOCK", 400, "Stock cannot be negative.");
   }
-  const updated = await prisma.productVariant.updateMany({
-    where: { id: variantId, product: { vendorId: user.id } },
-    data: { stockQuantity },
+  await prisma.$transaction(async (tx) => {
+    await lockInventoryVariants(tx, [variantId]);
+    const variant = await tx.productVariant.findFirst({
+      where: { id: variantId, product: { vendorId: user.id } },
+      select: { id: true },
+    });
+    if (!variant) throw new AppError("VARIANT_NOT_FOUND", 404, "Variant was not found.");
+    const held = await tx.stockReservationItem.aggregate({
+      where: {
+        variantId,
+        reservation: { status: "ACTIVE", expiresAt: { gt: new Date() } },
+      },
+      _sum: { quantity: true },
+    });
+    const reservedQuantity = held._sum.quantity ?? 0;
+    if (stockQuantity < reservedQuantity) {
+      throw new AppError(
+        "INSUFFICIENT_STOCK",
+        409,
+        `Stock cannot be reduced below the ${reservedQuantity} units currently reserved.`,
+      );
+    }
+    await tx.productVariant.update({
+      where: { id: variantId },
+      data: { stockQuantity },
+    });
   });
-  if (updated.count !== 1) throw new AppError("VARIANT_NOT_FOUND", 404, "Variant was not found.");
   return { updated: true as const, stockQuantity };
 }
 
 export async function listVendorNotifications(user: AuthenticatedUser) {
-  const notifications = await prisma.vendorNotification.findMany({
-    where: { vendorId: user.id },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
-  return {
-    notifications,
-    unreadCount: notifications.filter((item) => !item.readAt).length,
+  const where = {
+    vendorId: user.id,
+    OR: [{ entityType: null }, { entityType: { not: "CONVERSATION_CALL" } }],
   };
+  const [notifications, unreadCount] = await Promise.all([
+    prisma.vendorNotification.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    }),
+    prisma.vendorNotification.count({ where: { ...where, readAt: null } }),
+  ]);
+  return { notifications, unreadCount };
 }
 
 export async function listCustomerNotifications(user: AuthenticatedUser) {
   const [notifications, unreadCount] = await Promise.all([
     prisma.customerNotification.findMany({
-      where: { customerId: user.id },
+      where: {
+        customerId: user.id,
+        OR: [{ entityType: null }, { entityType: { not: "CONVERSATION_CALL" } }],
+      },
       orderBy: { createdAt: "desc" },
       take: 100,
     }),
-    prisma.customerNotification.count({ where: { customerId: user.id, readAt: null } }),
+    prisma.customerNotification.count({
+      where: {
+        customerId: user.id,
+        readAt: null,
+        OR: [{ entityType: null }, { entityType: { not: "CONVERSATION_CALL" } }],
+      },
+    }),
   ]);
   return { notifications, unreadCount };
 }

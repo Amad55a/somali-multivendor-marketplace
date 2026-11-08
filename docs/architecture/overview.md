@@ -79,4 +79,4 @@ GitHub Actions provisions PostgreSQL 18, applies migrations to its isolated data
 
 ## Implemented and future domains
 
-Implemented database/API functionality includes authentication, administrator security, vendor onboarding and review, the product catalogue, marketplace commerce, and persisted administrator/vendor notifications. Consult the current Prisma schema and versioned migrations for the authoritative feature set; future proposals such as video calls and additional market records are not implemented unless represented there.
+Implemented database/API functionality includes authentication, administrator security, vendor onboarding and review, the product catalogue, marketplace commerce, and persisted administrator/vendor notifications. Consult the current Prisma schema and versioned migrations for the authoritative feature set; future proposals are not implemented unless represented there.

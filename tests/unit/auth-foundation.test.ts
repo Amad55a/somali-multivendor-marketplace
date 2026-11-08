@@ -14,6 +14,7 @@ import { getAuthConfig } from "@/config/env";
 import {
   createAmazonOAuthState,
   completeAmazonLogin,
+  startAmazonLogin,
   verifyAmazonOAuthState,
 } from "@/features/auth/amazon";
 import {
@@ -171,8 +172,179 @@ describe("password and request boundaries", () => {
 });
 
 describe("Amazon OAuth state", () => {
+  it("keeps the PKCE verifier with the state cookie and sends it during exchange", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://localhost:3000");
+    vi.stubEnv("AMAZON_CLIENT_ID", "test-client");
+    vi.stubEnv("AMAZON_CLIENT_SECRET", "test-secret");
+    vi.stubEnv(
+      "AMAZON_REDIRECT_URI",
+      "https://localhost:3000/api/v1/auth/amazon/callback",
+    );
+
+    const start = startAmazonLogin("VENDOR");
+    const authorizationUrl = new URL(start.headers.get("location") ?? "");
+    const state = authorizationUrl.searchParams.get("state");
+    const setCookie = start.headers.get("set-cookie");
+    if (!state || !setCookie) throw new Error("Amazon OAuth cookies were not set.");
+    expect(setCookie).toContain("__Host-marketplace_amazon_state=");
+    expect(setCookie).not.toContain("marketplace_amazon_pkce=");
+
+    const cookie = setCookie.split(";")[0];
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 401 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(
+      completeAmazonLogin(
+        new Request(
+          `https://localhost:3000/api/v1/auth/amazon/callback?code=opaque&state=${encodeURIComponent(state)}`,
+          { headers: { cookie } },
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "AMAZON_TOKEN_EXCHANGE_REJECTED" });
+
+    const tokenBody = fetch.mock.calls[0]?.[1]?.body;
+    expect(tokenBody).toBeInstanceOf(URLSearchParams);
+    if (!(tokenBody instanceof URLSearchParams)) {
+      throw new Error("Amazon token request did not use form data.");
+    }
+    expect(tokenBody.get("code_verifier")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://api.amazon.com/auth/o2/token");
+    expect(fetch.mock.calls[0]?.[1]?.method).toBe("POST");
+    expect(authorizationUrl.searchParams.get("scope")).toBe("profile");
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      "https://localhost:3000/api/v1/auth/amazon/callback",
+    );
+  });
+
+  it("accepts an in-flight callback using the previous separate PKCE cookie", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://localhost:3000");
+    vi.stubEnv("AMAZON_CLIENT_ID", "test-client");
+    vi.stubEnv("AMAZON_CLIENT_SECRET", "test-secret");
+    vi.stubEnv(
+      "AMAZON_REDIRECT_URI",
+      "https://localhost:3000/api/v1/auth/amazon/callback",
+    );
+
+    const start = startAmazonLogin("VENDOR");
+    const state = new URL(start.headers.get("location") ?? "").searchParams.get("state");
+    const cookieHeader = start.headers.get("set-cookie");
+    if (!state || !cookieHeader) throw new Error("Amazon OAuth cookies were not set.");
+    const combinedCookie = cookieHeader.split(";")[0];
+    const separator = combinedCookie.lastIndexOf("~");
+    const cookieName = combinedCookie.slice(0, combinedCookie.indexOf("="));
+    const cookieValue = combinedCookie.slice(combinedCookie.indexOf("=") + 1);
+    const verifier = cookieValue.slice(separator + 1);
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 401 }));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(
+      completeAmazonLogin(
+        new Request(
+          `https://localhost:3000/api/v1/auth/amazon/callback?code=opaque&state=${encodeURIComponent(state)}`,
+          {
+            headers: {
+              cookie: `${cookieName}=${state}; __Host-marketplace_amazon_pkce=${verifier}`,
+            },
+          },
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "AMAZON_TOKEN_EXCHANGE_REJECTED" });
+
+    const tokenBody = fetch.mock.calls[0]?.[1]?.body;
+    expect(tokenBody).toBeInstanceOf(URLSearchParams);
+    if (!(tokenBody instanceof URLSearchParams)) {
+      throw new Error("Amazon token request did not use form data.");
+    }
+    expect(tokenBody.get("code_verifier")).toBe(verifier);
+  });
+
+  it("rejects Amazon sign-in started from a host that cannot receive its callback cookie", () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://shop.example.test");
+    vi.stubEnv("AMAZON_CLIENT_ID", "test-client");
+    vi.stubEnv("AMAZON_CLIENT_SECRET", "test-secret");
+    vi.stubEnv(
+      "AMAZON_REDIRECT_URI",
+      "https://shop.example.test/api/v1/auth/amazon/callback",
+    );
+
+    expect(() =>
+      startAmazonLogin(
+        "VENDOR",
+        "en",
+        new Request("http://localhost:3000/api/v1/auth/amazon", {
+          method: "POST",
+          headers: {
+            origin: "http://localhost:3000",
+            "x-forwarded-host": "shop.example.test",
+            "x-forwarded-proto": "https",
+          },
+        }),
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: "AMAZON_CALLBACK_ORIGIN_MISMATCH" }),
+    );
+  });
+
+  it("accepts the configured browser origin behind a reverse proxy", () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://shop.example.test");
+    vi.stubEnv("AMAZON_CLIENT_ID", "test-client");
+    vi.stubEnv("AMAZON_CLIENT_SECRET", "test-secret");
+    vi.stubEnv(
+      "AMAZON_REDIRECT_URI",
+      "https://shop.example.test/api/v1/auth/amazon/callback",
+    );
+
+    const response = startAmazonLogin(
+      "VENDOR",
+      "en",
+      new Request("http://internal-service:3000/api/v1/auth/amazon", {
+        method: "POST",
+        headers: {
+          origin: "https://shop.example.test",
+          "x-forwarded-host": "attacker.example",
+          "x-forwarded-proto": "http",
+        },
+      }),
+    );
+    const authorizationUrl = new URL(response.headers.get("location") ?? "");
+
+    expect(response.status).toBe(302);
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      "https://shop.example.test/api/v1/auth/amazon/callback",
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "__Host-marketplace_amazon_state=",
+    );
+  });
+
+  it("supports HTTPS localhost when both application and callback URLs use it", () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://localhost:3000");
+    vi.stubEnv("AMAZON_CLIENT_ID", "test-client");
+    vi.stubEnv("AMAZON_CLIENT_SECRET", "test-secret");
+    vi.stubEnv(
+      "AMAZON_REDIRECT_URI",
+      "https://localhost:3000/api/v1/auth/amazon/callback",
+    );
+
+    const response = startAmazonLogin(
+      "CUSTOMER",
+      "en",
+      new Request("http://internal-service:3000/api/v1/auth/amazon", {
+        method: "POST",
+        headers: { origin: "https://localhost:3000" },
+      }),
+    );
+
+    expect(response.status).toBe(302);
+    expect(
+      new URL(response.headers.get("location") ?? "").searchParams.get(
+        "redirect_uri",
+      ),
+    ).toBe("https://localhost:3000/api/v1/auth/amazon/callback");
+  });
+
   it("signs the chosen account type and rejects a callback state mismatch", async () => {
     const state = createAmazonOAuthState("VENDOR");
+    const callbackLog = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(verifyAmazonOAuthState(state, state)).toEqual({
       accountType: "VENDOR",
       locale: "en",
@@ -192,5 +364,14 @@ describe("Amazon OAuth state", () => {
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toContain("amazon_failed");
     expect(fetch).not.toHaveBeenCalled();
+    expect(callbackLog).toHaveBeenCalledWith(
+      "[auth] Amazon OAuth callback stage failed",
+      expect.objectContaining({
+        stage: "state_validation",
+        code: "AMAZON_STATE_MISMATCH",
+        requestOriginMatchesConfiguredOrigin: false,
+      }),
+    );
+    expect(JSON.stringify(callbackLog.mock.calls)).not.toContain(state);
   });
 });

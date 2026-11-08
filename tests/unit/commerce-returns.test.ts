@@ -17,6 +17,7 @@ const database = vi.hoisted(() => {
     orderLine: methods(),
     productReview: methods(),
     returnRequest: methods(),
+    returnDisputeUpdate: methods(),
     customerNotification: methods(),
     vendorNotification: methods(),
     adminNotification: methods(),
@@ -26,6 +27,7 @@ const database = vi.hoisted(() => {
     paymentRecord: methods(),
     marketplaceOrder: methods(),
     categoryCommission: methods(),
+    productVariant: methods(),
   };
 });
 
@@ -69,6 +71,7 @@ const tx = {
   orderLine: database.orderLine,
   productReview: database.productReview,
   returnRequest: database.returnRequest,
+  returnDisputeUpdate: database.returnDisputeUpdate,
   customerNotification: database.customerNotification,
   vendorNotification: database.vendorNotification,
   adminNotification: database.adminNotification,
@@ -78,6 +81,7 @@ const tx = {
   paymentRecord: database.paymentRecord,
   marketplaceOrder: database.marketplaceOrder,
   categoryCommission: database.categoryCommission,
+  productVariant: database.productVariant,
 };
 
 function runTransaction() {
@@ -100,9 +104,10 @@ function eligibleLine(deliveredAt = new Date()) {
   };
 }
 
-function returnRecord(status: string) {
+function returnRecord(status: string, quantity = 1, id = "return-1", paymentAmount = 170) {
   const orderLine = {
     id: "line-1",
+    variantId: "variant-1",
     unitPrice: new Prisma.Decimal(100),
     quantity: 2,
     categoryId: "category-1",
@@ -119,7 +124,7 @@ function returnRecord(status: string) {
         platformDiscount: new Prisma.Decimal(20),
         payment: {
           id: "payment-1",
-          amount: new Prisma.Decimal(170),
+          amount: new Prisma.Decimal(paymentAmount),
           simulated: true,
           status: "SUCCEEDED",
         },
@@ -131,13 +136,15 @@ function returnRecord(status: string) {
     },
   };
   return {
-    id: "return-1",
+    id,
     orderId: "order-1",
     orderLineId: "line-1",
     customerId: customer.id,
     vendorId: vendor.id,
-    quantity: 1,
+    quantity,
     status,
+    vendorNote: ["VENDOR_REJECTED", "ESCALATED", "IN_REVIEW"].includes(status) ? "The product was used or damaged." : null,
+    disputeResolution: null,
     orderLine,
   };
 }
@@ -245,32 +252,156 @@ describe("vendor and admin return workflow", () => {
     await expect(reviewReturn(vendor, "return-1", "REJECT"))
       .rejects.toMatchObject({ code: "RETURN_DECISION_REASON_REQUIRED" });
 
-    database.returnRequest.update.mockResolvedValue({ status: "VENDOR_APPROVED" } as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
     await expect(reviewReturn(vendor, "return-1", "APPROVE", undefined, "Ship to the store"))
       .resolves.toMatchObject({ status: "VENDOR_APPROVED" });
 
     database.returnRequest.findUnique.mockResolvedValue(returnRecord("REQUESTED") as never);
-    database.returnRequest.update.mockResolvedValue({ status: "VENDOR_REJECTED" } as never);
     await expect(reviewReturn(vendor, "return-1", "REJECT", "The item was used"))
       .resolves.toMatchObject({ status: "VENDOR_REJECTED" });
 
     database.returnRequest.findUnique.mockResolvedValue(returnRecord("VENDOR_REJECTED") as never);
-    database.returnRequest.update.mockResolvedValue({ status: "ESCALATED" } as never);
     await expect(reviewReturn(customer, "return-1", "ESCALATE"))
       .resolves.toMatchObject({ status: "ESCALATED" });
     expect(database.adminNotification.create).toHaveBeenCalledOnce();
 
     database.returnRequest.findUnique.mockResolvedValue(returnRecord("ESCALATED") as never);
-    database.returnRequest.update.mockResolvedValue({ status: "ADMIN_REJECTED" } as never);
     await expect(reviewReturn(admin, "return-1", "ADMIN_REJECT", "Evidence did not match"))
       .resolves.toMatchObject({ status: "ADMIN_REJECTED" });
     expect(database.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         actorUserId: admin.id,
-        action: "ADMIN_REJECTED",
+        action: "ADMIN_UPHOLD",
         metadata: expect.objectContaining({ reason: "Evidence did not match" }),
       }),
     }));
+  });
+
+  it("moves an escalated appeal to review and prevents duplicate transitions", async () => {
+    runTransaction();
+    database.returnRequest.findUnique.mockResolvedValue(returnRecord("ESCALATED") as never);
+    database.returnRequest.updateMany
+      .mockResolvedValueOnce({ count: 1 } as never)
+      .mockResolvedValueOnce({ count: 0 } as never);
+
+    await expect(reviewReturn(admin, "return-1", "ADMIN_START_REVIEW", "We are reviewing the evidence."))
+      .resolves.toMatchObject({
+        status: "IN_REVIEW",
+        vendorNote: "The product was used or damaged.",
+        adminNote: "We are reviewing the evidence.",
+      });
+    expect(database.returnRequest.updateMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: { id: "return-1", status: "ESCALATED" },
+      data: expect.objectContaining({ status: "IN_REVIEW" }),
+    }));
+    expect(database.customerNotification.create).toHaveBeenCalledOnce();
+    expect(database.vendorNotification.create).toHaveBeenCalledOnce();
+    expect(database.auditLog.create).toHaveBeenCalledOnce();
+    expect(database.returnDisputeUpdate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ kind: "REVIEW_STARTED", audience: "BOTH" }),
+    }));
+
+    await expect(reviewReturn(admin, "return-1", "ADMIN_START_REVIEW", "Duplicate"))
+      .rejects.toMatchObject({ code: "RETURN_CONCURRENT_CHANGE" });
+    expect(database.returnDisputeUpdate.create).toHaveBeenCalledOnce();
+  });
+
+  it("overturns a vendor rejection by authorizing shipment only, without refund or restock", async () => {
+    runTransaction();
+    database.returnRequest.findUnique.mockResolvedValue(returnRecord("IN_REVIEW") as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await expect(reviewReturn(admin, "return-1", "ADMIN_OVERTURN", "The evidence supports the customer.", "Ship the item to the vendor."))
+      .resolves.toMatchObject({
+        status: "ADMIN_APPROVED",
+        disputeResolution: "RESOLVED_CUSTOMER_FAVORED",
+        returnInstructions: "Ship the item to the vendor.",
+        vendorNote: "The product was used or damaged.",
+      });
+    expect(database.returnRequest.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "return-1", status: "IN_REVIEW" },
+      data: expect.objectContaining({ status: "ADMIN_APPROVED", disputeResolution: "RESOLVED_CUSTOMER_FAVORED" }),
+    }));
+    expect(database.customerNotification.create).toHaveBeenCalledOnce();
+    expect(database.vendorNotification.create).toHaveBeenCalledOnce();
+    expect(database.simulatedRefund.create).not.toHaveBeenCalled();
+    expect(database.productVariant.update).not.toHaveBeenCalled();
+    expect(database.ledgerEntry.createMany).not.toHaveBeenCalled();
+  });
+
+  it("upholds the vendor decision with a saved admin explanation and closes the dispute", async () => {
+    runTransaction();
+    database.returnRequest.findUnique.mockResolvedValue(returnRecord("ESCALATED") as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await expect(reviewReturn(admin, "return-1", "ADMIN_UPHOLD", "The vendor's inspection was supported by evidence."))
+      .resolves.toMatchObject({
+        status: "ADMIN_REJECTED",
+        disputeResolution: "RESOLVED_VENDOR_UPHELD",
+        adminNote: "The vendor's inspection was supported by evidence.",
+      });
+    expect(database.customerNotification.create).toHaveBeenCalledOnce();
+    expect(database.vendorNotification.create).toHaveBeenCalledOnce();
+    expect(database.returnDisputeUpdate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ kind: "VENDOR_DECISION_UPHELD", content: "The vendor's inspection was supported by evidence." }),
+    }));
+    expect(database.simulatedRefund.create).not.toHaveBeenCalled();
+    expect(database.productVariant.update).not.toHaveBeenCalled();
+  });
+
+  it("records targeted information requests and participant replies without closing the dispute", async () => {
+    runTransaction();
+    database.returnRequest.findUnique.mockResolvedValue(returnRecord("ESCALATED") as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
+    await expect(reviewReturn(admin, "return-1", "ADMIN_REQUEST_INFO", "Please upload photos of the packaging.", undefined, "CUSTOMER"))
+      .resolves.toMatchObject({ status: "IN_REVIEW", disputeResolution: "INFORMATION_REQUESTED" });
+    expect(database.returnDisputeUpdate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ audience: "CUSTOMER", requestedFrom: "CUSTOMER", kind: "INFORMATION_REQUESTED" }),
+    }));
+    expect(database.customerNotification.create).toHaveBeenCalledOnce();
+    expect(database.vendorNotification.create).not.toHaveBeenCalled();
+
+    database.returnRequest.findUnique.mockResolvedValue(returnRecord("IN_REVIEW") as never);
+    await expect(reviewReturn(customer, "return-1", "DISPUTE_MESSAGE", "I uploaded another photo."))
+      .resolves.toMatchObject({ status: "IN_REVIEW" });
+    expect(database.returnDisputeUpdate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ authorRole: "CUSTOMER", audience: "BOTH", kind: "MESSAGE" }),
+    }));
+    expect(database.adminNotification.create).toHaveBeenCalledOnce();
+    expect(database.vendorNotification.create).toHaveBeenCalledOnce();
+  });
+
+  it("does not expose vendor-only evidence requests as customer decision notes", async () => {
+    runTransaction();
+    database.returnRequest.findUnique.mockResolvedValue(returnRecord("IN_REVIEW") as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await reviewReturn(admin, "return-1", "ADMIN_REQUEST_INFO", "Please provide the supplier invoice.", undefined, "VENDOR");
+
+    expect(database.returnRequest.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ adminNote: undefined }),
+    }));
+    expect(database.returnDisputeUpdate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ audience: "VENDOR", requestedFrom: "VENDOR" }),
+    }));
+    expect(database.customerNotification.create).not.toHaveBeenCalled();
+    expect(database.vendorNotification.create).toHaveBeenCalledOnce();
+  });
+
+  it("rejects duplicate final decisions after the state has advanced", async () => {
+    runTransaction();
+    database.returnRequest.findUnique
+      .mockResolvedValueOnce(returnRecord("ESCALATED") as never)
+      .mockResolvedValueOnce(returnRecord("ADMIN_REJECTED") as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await reviewReturn(admin, "return-1", "ADMIN_UPHOLD", "Decision explanation.");
+    await expect(reviewReturn(admin, "return-1", "ADMIN_UPHOLD", "Duplicate decision."))
+      .rejects.toMatchObject({ code: "INVALID_RETURN_STATE" });
+    expect(database.returnRequest.updateMany).toHaveBeenCalledOnce();
+    expect(database.returnDisputeUpdate.create).toHaveBeenCalledOnce();
+    expect(database.simulatedRefund.create).not.toHaveBeenCalled();
+    expect(database.productVariant.update).not.toHaveBeenCalled();
   });
 
   it("refunds only after receipt, records a partial simulated refund, and reverses the owning vendor's ledger", async () => {
@@ -278,6 +409,7 @@ describe("vendor and admin return workflow", () => {
     database.returnRequest.findUnique.mockResolvedValue(returnRecord("RETURN_SHIPPED") as never);
     database.simulatedRefund.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal(0) } } as never);
     database.categoryCommission.findUnique.mockResolvedValue({ percent: new Prisma.Decimal(10) } as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
     database.returnRequest.update.mockResolvedValue({ status: "REFUNDED" } as never);
 
     await expect(reviewReturn(vendor, "return-1", "RECEIVE"))
@@ -297,12 +429,62 @@ describe("vendor and admin return workflow", () => {
       ]),
       skipDuplicates: true,
     }));
+    expect(database.returnRequest.updateMany).toHaveBeenCalledWith({
+      where: { id: "return-1", status: "RETURN_SHIPPED" },
+      data: expect.objectContaining({ status: "REFUND_PROCESSING" }),
+    });
+    expect(database.productVariant.update).toHaveBeenCalledWith({
+      where: { id: "variant-1" },
+      data: { stockQuantity: { increment: 1 } },
+    });
     expect(database.paymentRecord.update).not.toHaveBeenCalled();
 
     database.returnRequest.findUnique.mockResolvedValue(returnRecord("REFUNDED") as never);
     await expect(reviewReturn(vendor, "return-1", "RECEIVE"))
       .rejects.toMatchObject({ code: "INVALID_RETURN_STATE" });
     expect(database.simulatedRefund.create).toHaveBeenCalledOnce();
+  });
+
+  it("does not restock or refund when the conditional receipt transition loses a race", async () => {
+    runTransaction();
+    database.returnRequest.findUnique.mockResolvedValue(returnRecord("RETURN_SHIPPED") as never);
+    database.simulatedRefund.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal(0) } } as never);
+    database.returnRequest.updateMany.mockResolvedValue({ count: 0 } as never);
+
+    await expect(reviewReturn(vendor, "return-1", "RECEIVE"))
+      .rejects.toMatchObject({ code: "RETURN_CONCURRENT_CHANGE" });
+    expect(database.productVariant.update).not.toHaveBeenCalled();
+    expect(database.simulatedRefund.create).not.toHaveBeenCalled();
+    expect(database.ledgerEntry.createMany).not.toHaveBeenCalled();
+  });
+
+  it("refunds and restocks sequential partial returns without exceeding the captured amount", async () => {
+    runTransaction();
+    let refunded = new Prisma.Decimal(0);
+    database.returnRequest.findUnique.mockImplementation(({ where }: { where: { id: string } }) =>
+      Promise.resolve(returnRecord("RETURN_SHIPPED", 1, where.id, 220)) as never,
+    );
+    database.returnRequest.updateMany.mockResolvedValue({ count: 1 } as never);
+    database.returnRequest.update.mockResolvedValue({ status: "REFUNDED" } as never);
+    database.simulatedRefund.aggregate.mockImplementation(async () => ({ _sum: { amount: refunded } }) as never);
+    database.simulatedRefund.create.mockImplementation(({ data }: { data: { amount: Prisma.Decimal } }) => {
+      refunded = refunded.add(data.amount);
+      return Promise.resolve({}) as never;
+    });
+
+    await reviewReturn(vendor, "return-1", "RECEIVE");
+    await reviewReturn(vendor, "return-2", "RECEIVE");
+
+    expect(refunded.toFixed(2)).toBe("174.00");
+    expect(database.simulatedRefund.create).toHaveBeenCalledTimes(2);
+    expect(database.productVariant.update).toHaveBeenNthCalledWith(1, {
+      where: { id: "variant-1" },
+      data: { stockQuantity: { increment: 1 } },
+    });
+    expect(database.productVariant.update).toHaveBeenNthCalledWith(2, {
+      where: { id: "variant-1" },
+      data: { stockQuantity: { increment: 1 } },
+    });
   });
 
   it("rejects a receipt refund that would exceed the remaining captured payment", async () => {

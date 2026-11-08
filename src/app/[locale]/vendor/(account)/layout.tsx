@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { LogoutButton } from "@/features/auth/components/logout-button";
@@ -7,8 +8,9 @@ import { SiteHeader } from "@/components/layout/site-header";
 import { isLocale } from "@/i18n/config";
 import { getDictionary } from "@/i18n/get-dictionary";
 import { requirePageAccount } from "@/lib/auth/route-guards";
-
-export const instant = false;
+import type { Locale } from "@/i18n/config";
+import { SupportLauncher } from "@/features/support/components/support-portal";
+import { SupportRouteFallback } from "@/features/support/components/support-route-fallback";
 
 export default async function VendorAccountLayout({
   children,
@@ -19,9 +21,27 @@ export default async function VendorAccountLayout({
 }>) {
   const { locale } = await params;
   if (!isLocale(locale)) notFound();
-  await requirePageAccount("VENDOR", locale);
   const dictionary = await getDictionary(locale);
 
+  return (
+    <Suspense fallback={<SupportRouteFallback locale={locale} />}>
+      <AuthenticatedVendorAccountLayout locale={locale} dictionary={dictionary}>
+        {children}
+      </AuthenticatedVendorAccountLayout>
+    </Suspense>
+  );
+}
+
+async function AuthenticatedVendorAccountLayout({
+  children,
+  locale,
+  dictionary,
+}: Readonly<{
+  children: ReactNode;
+  locale: Locale;
+  dictionary: Awaited<ReturnType<typeof getDictionary>>;
+}>) {
+  const vendor = await requirePageAccount("VENDOR", locale);
   return (
     <div className="site-chrome">
       <SiteHeader />
@@ -34,12 +54,16 @@ export default async function VendorAccountLayout({
             <Link href={`/${locale}/vendor/status`}>
               {dictionary.auth.applicationStatus}
             </Link>
+            <Link href={`/${locale}/vendor/help`}>
+              {dictionary.support.navLabel}
+            </Link>
           </div>
           <LogoutButton locale={locale} />
         </nav>
         {children}
       </main>
       <SiteFooter />
+      <SupportLauncher audience="vendor" />
     </div>
   );
 }

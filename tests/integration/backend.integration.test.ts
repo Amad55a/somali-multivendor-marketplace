@@ -323,10 +323,14 @@ describe("customer and vendor authentication", () => {
 describe("administrator authentication and MFA", () => {
   it("requires email OTP and TOTP, encrypts the secret, and consumes recovery codes once", async () => {
     const admin = await createAdmin(uniqueEmail());
+    const otherAdmin = await createAdmin(uniqueEmail());
     const secret = new OTPAuth.Secret({ size: 20 }).base32;
 
     await beginAdminLogin(admin.email, "admin-password-long-enough");
     const firstEmailCode = lastCode(admin.email, "ADMIN_LOGIN");
+    await expect(
+      verifyAdminEmail(otherAdmin.email, firstEmailCode),
+    ).rejects.toMatchObject({ code: "INVALID_ADMIN_CHALLENGE" });
     const setupChallenge = await verifyAdminEmail(admin.email, firstEmailCode);
     expect(setupChallenge.mfaRequired).toBe(false);
     await setupAdminMfa(setupChallenge.challengeId, secret);
@@ -366,6 +370,34 @@ describe("administrator authentication and MFA", () => {
     const secondEmailCode = lastCode(admin.email, "ADMIN_LOGIN");
     const secondChallenge = await verifyAdminEmail(admin.email, secondEmailCode);
     expect(secondChallenge.mfaRequired).toBe(true);
+
+    const otherTotp = new OTPAuth.TOTP({
+      issuer: "Somsuuq",
+      label: otherAdmin.email,
+      secret: new OTPAuth.Secret({ size: 20 }),
+      digits: 6,
+      period: 30,
+    });
+    await expect(
+      verifyAdminMfa(
+        secondChallenge.challengeId,
+        totp.generate({ timestamp: Date.now() - 2 * 60 * 1000 }),
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_MFA_CODE" });
+    await expect(
+      verifyAdminMfa(secondChallenge.challengeId, otherTotp.generate()),
+    ).rejects.toMatchObject({ code: "INVALID_MFA_CODE" });
+
+    const configuredKey = process.env.ADMIN_MFA_ENCRYPTION_KEY;
+    if (!configuredKey) throw new Error("Integration MFA key was not configured.");
+    vi.stubEnv("ADMIN_MFA_ENCRYPTION_KEY", "f".repeat(64));
+    await expect(
+      verifyAdminMfa(secondChallenge.challengeId, totp.generate()),
+    ).rejects.toMatchObject({
+      code: "ADMIN_MFA_SECRET_UNAVAILABLE",
+      status: 503,
+    });
+    vi.stubEnv("ADMIN_MFA_ENCRYPTION_KEY", configuredKey);
 
     const secondLogin = await verifyAdminMfa(
       secondChallenge.challengeId,

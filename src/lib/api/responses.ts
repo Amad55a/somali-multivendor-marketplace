@@ -73,6 +73,14 @@ function mapKnownInfrastructureError(error: unknown): AppError | null {
     );
   }
 
+  if (code === "P2021" || code === "P2022") {
+    return new AppError(
+      "DATABASE_SCHEMA_OUTDATED",
+      503,
+      "The database schema is incompatible with this application version.",
+    );
+  }
+
   if (code === "P2002") {
     return new AppError("CONFLICT", 409, "The request conflicts with existing data.");
   }

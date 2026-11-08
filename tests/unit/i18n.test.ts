@@ -40,5 +40,17 @@ describe("locale dictionaries", () => {
     expect(createTranslator(so)("products.filters.all")).toBe(
       "Dhammaan Alaabta",
     );
+    expect(createTranslator(en)("support.helpTitle")).toBe(
+      "How can we help?",
+    );
+    expect(createTranslator(so)("support.helpTitle")).toBe(
+      "Sideen kuu caawin karnaa?",
+    );
+    expect(createTranslator(en)("support.widget.title")).toBe(
+      "Somsuuq Help Center",
+    );
+    expect(createTranslator(so)("support.widget.title")).toBe(
+      "Xarunta Caawinta Somsuuq",
+    );
   });
 });

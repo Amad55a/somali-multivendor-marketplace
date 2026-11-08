@@ -36,7 +36,7 @@ export function CustomerOrderDetail({ order, locale }: Readonly<{ order: Custome
                     ? <Image src={`/api/v1/vendors/${vendorOrder.vendorId}/logo`} alt="" width={48} height={48} unoptimized className="size-12 rounded-xl object-cover" />
                     : <span className="grid size-12 place-items-center rounded-xl bg-[#123b35] text-lg font-bold text-[#f4b942]">{(vendorOrder.storeName ?? "S").slice(0, 1)}</span>}
                   <div>
-                    <h2 className="font-bold text-[#123b35]">{vendorOrder.storeName ?? (isSomali ? "Dukaan" : "Store")}</h2>
+                    <Link href={`/${locale}/stores/${vendorOrder.vendorId}`} className="font-bold text-[#123b35] hover:underline">{vendorOrder.storeName ?? (isSomali ? "Dukaan" : "Store")}</Link>
                     <p className="text-sm text-slate-600">{isSomali ? "Dalab-hoosaad" : "Vendor order"} · {vendorOrder.status.replaceAll("_", " ")}</p>
                   </div>
                 </div>
