@@ -533,19 +533,33 @@ describe("vendor onboarding and admin review", () => {
       where: { entityId: { in: [pending.application.id, application.application.id] } },
       select: { entityId: true, type: true, readAt: true },
     });
-    expect(notifications).toHaveLength(2);
-    expect(notifications).toEqual(expect.arrayContaining([
-      expect.objectContaining({
+    const notificationSummary = notifications
+      .map(({ entityId, type, readAt }) => ({ entityId, type, readAt }))
+      .sort((left, right) =>
+        (left.entityId ?? "").localeCompare(right.entityId ?? "") ||
+        left.type.localeCompare(right.type),
+      );
+    const expectedNotifications = [
+      {
         entityId: pending.application.id,
         type: "VENDOR_APPLICATION_SUBMITTED",
         readAt: null,
-      }),
-      expect.objectContaining({
+      },
+      {
+        entityId: pending.application.id,
+        type: "VENDOR_APPLICATION_SUBMITTED",
+        readAt: null,
+      },
+      {
         entityId: application.application.id,
         type: "VENDOR_APPLICATION_SUBMITTED",
         readAt: null,
-      }),
-    ]));
+      },
+    ].sort((left, right) =>
+      (left.entityId ?? "").localeCompare(right.entityId ?? "") ||
+      left.type.localeCompare(right.type),
+    );
+    expect(notificationSummary).toEqual(expectedNotifications);
   });
 
   it("protects admin routes from missing and customer sessions", async () => {
