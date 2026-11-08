@@ -42,6 +42,37 @@ As per system documentation standards, fake, placeholder, or generated mock scre
 | `19-buyer-vendor-chat.png` | `/[locale]/customer/messages` | Customer / Vendor | Real-time Socket.IO chat interface, message status indicators (sent/delivered/read), product/order card sharing, and attachment previews. |
 | `20-swagger-ui.png` | `/api-docs` | Developer | Interactive Swagger UI showing categorized endpoints, OpenAPI 3.0.3 specification, session cookie authentication, and reCAPTCHA interceptor. |
 
+## Captured Screenshots
+
+The following screenshots were supplied from a running marketplace instance.
+Exact duplicate attachments are listed once. Visible personal names, account
+details, contact information, order references, coupon codes, and browser
+addresses have been redacted in the saved copies.
+
+| File | View |
+|---|---|
+| [`21-somali-customer-marketplace.png`](./21-somali-customer-marketplace.png) | Somali-language customer marketplace |
+| [`22-customer-home-authenticated.png`](./22-customer-home-authenticated.png) | Authenticated customer home |
+| [`23-customer-product-listing.png`](./23-customer-product-listing.png) | Customer product listing with category filters |
+| [`24-customer-product-detail.png`](./24-customer-product-detail.png) | Product detail, variants, stock, and purchase actions |
+| [`25-customer-cart.png`](./25-customer-cart.png) | Customer cart with vendor subtotal |
+| [`26-customer-checkout.png`](./26-customer-checkout.png) | Checkout form and simulated payment summary |
+| [`27-customer-order-confirmation.png`](./27-customer-order-confirmation.png) | Simulated order confirmation |
+| [`28-vendor-dashboard.png`](./28-vendor-dashboard.png) | Vendor dashboard metrics and product activity |
+| [`29-vendor-store-profile.png`](./29-vendor-store-profile.png) | Vendor store profile and business details |
+| [`30-vendor-product-form.png`](./30-vendor-product-form.png) | Vendor product creation form |
+| [`31-vendor-coupons.png`](./31-vendor-coupons.png) | Vendor coupon creation and list |
+| [`32-vendor-orders.png`](./32-vendor-orders.png) | Vendor order management |
+| [`33-vendor-returns.png`](./33-vendor-returns.png) | Vendor return review and dispute outcome |
+| [`34-vendor-support-widget.png`](./34-vendor-support-widget.png) | Vendor support widget and recent tickets |
+| [`35-admin-overview.png`](./35-admin-overview.png) | Administrator dashboard overview |
+| [`36-admin-vendor-applications.png`](./36-admin-vendor-applications.png) | Admin vendor application review |
+| [`37-admin-commission-settings.png`](./37-admin-commission-settings.png) | Admin commission settings |
+| [`38-marketplace-homepage-guest.png`](./38-marketplace-homepage-guest.png) | Guest marketplace homepage |
+| [`39-swagger-api-documentation.png`](./39-swagger-api-documentation.png) | Swagger UI API documentation |
+| [`40-customer-vendor-messaging.png`](./40-customer-vendor-messaging.png) | Somali-language customer/vendor messaging with a shared product card |
+| [`41-mobile-marketplace-homepage.png`](./41-mobile-marketplace-homepage.png) | Mobile Somali-language marketplace homepage |
+
 ---
 
 ## Capturing Instructions
