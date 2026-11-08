@@ -2,19 +2,18 @@
 
 **Database:** PostgreSQL  
 **ORM:** Prisma ORM 7  
-**Current scope:** Authentication, administrator security, and vendor onboarding  
+**Current scope:** Authentication, vendor onboarding, product catalogue, customer orders, verified reviews, returns, simulated refunds, receipts, and SMS outbox
 **Schema source:** [`prisma/schema.prisma`](../prisma/schema.prisma)  
 **ER diagram:** [`docs/diagrams/database-erd.md`](./diagrams/database-erd.md)
 
 ## Current database status
 
-The development database was checked on 2026-11-05 using Prisma ORM 7:
+The configured development database was checked after the simulated payment, receipt, and outbox migration using Prisma ORM 7:
 
-- `prisma migrate status`: all three repository migrations are applied; database reports up to date.
-- `prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code`: no difference detected.
-- The database catalog contains the ten application tables represented below, in addition to Prisma's `_prisma_migrations` history table.
+- At that time, `prisma migrate status` reported all 15 then-existing migrations as applied.
+- The admin notification table and simulated payment, receipt, and SMS outbox tables exist in the configured local database.
 
-These results describe the configured local development database only. They do not establish that another developer, CI, staging, or production database is synchronized.
+These are historical results for the configured local development database only; they do not include the later customer order/review/return migration or establish that another developer, CI, staging, or production database is synchronized. Run `npx prisma migrate deploy` for deployed environments.
 
 ## Implemented PostgreSQL enums
 
@@ -23,7 +22,7 @@ These results describe the configured local development database only. They do n
 | `AccountType` | `CUSTOMER`, `VENDOR`, `ADMIN` |
 | `AuthProvider` | `LOCAL`, `AMAZON` |
 | `VerificationPurpose` | `EMAIL_VERIFY`, `ADMIN_LOGIN`, `PASSWORD_RESET` |
-| `VendorApplicationStatus` | `DRAFT`, `PENDING`, `UNDER_REVIEW`, `NEEDS_INFORMATION`, `APPROVED`, `REJECTED`, `SUSPENDED` |
+| `VendorApplicationStatus` | `DRAFT`, `PENDING`, `UNDER_REVIEW`, `CHANGES_REQUESTED`, `APPROVED`, `REJECTED`, `SUSPENDED` |
 | `VendorVerificationStatus` | `UNVERIFIED`, `PENDING`, `VERIFIED`, `REJECTED` |
 
 ## Implemented tables
@@ -108,7 +107,7 @@ Columns: `id UUID !` (PK), `actorUserId UUID ?`, `action VARCHAR(100) !`, `entit
 
 Columns: `id UUID !` (PK), `userId UUID !` (unique), `accountType AccountType !` (defaults to `VENDOR`), `applicationStatus VendorApplicationStatus !` (defaults to `DRAFT`), `verificationStatus VendorVerificationStatus !` (defaults to `UNVERIFIED`), nullable business/contact/location fields (`businessName VARCHAR(200)`, `storeName VARCHAR(120)`, `businessType VARCHAR(100)`, `description VARCHAR(2000)`, `contactName VARCHAR(160)`, `phone VARCHAR(32)`, `country VARCHAR(100)`, `region VARCHAR(100)`, `city VARCHAR(100)`, `address VARCHAR(300)`, `marketAssociation VARCHAR(200)`), `submittedAt TIMESTAMPTZ(6) ?`, `reviewedAt TIMESTAMPTZ(6) ?`, `reviewedById UUID ?`, `rejectionReason VARCHAR(1000) ?`, `informationRequest VARCHAR(1000) ?`, and non-null `createdAt` / `updatedAt` timestamps.
 
-`(userId, accountType)` references `users(id, accountType)` with cascade delete. `reviewedById` references `users(id)` with `ON DELETE SET NULL`. Unique indexes exist on `userId` and `(userId, accountType)`; the latter supports the compound foreign key, while the former separately enforces one profile per vendor. Additional indexes: `(applicationStatus, submittedAt)` and `(reviewedById, reviewedAt)`.
+`(userId, accountType)` references `users(id, accountType)` with cascade delete. `reviewedById` references `users(id)` with `ON DELETE SET NULL`. Unique indexes exist on `userId` and `(userId, accountType)`; the latter supports the compound foreign key, while the former separately enforces one profile per vendor. Additional indexes: `(applicationStatus, submittedAt)` and `(reviewedById, reviewedAt)`. `district` is stored separately from the street/business `address`.
 
 The migration adds a PostgreSQL check requiring `accountType = 'VENDOR'`; Prisma schema syntax does not model this check. `marketAssociation` is currently free text, not a relation to a market table.
 
@@ -116,7 +115,13 @@ The migration adds a PostgreSQL check requiring `accountType = 'VENDOR'`; Prisma
 
 The [ER diagram](./diagrams/database-erd.md) shows every implemented relation and key. Customer, vendor, and admin are user account types; there are no separate customer or vendor identity tables. A user has zero or one vendor profile and zero or one administrator MFA method. A vendor profile's reviewer is an optional user reference; the admin-only review policy is enforced in application logic.
 
-Vendor application transitions and audit records are written by the vendor review service. Approval status is not a property of a user account: vendor status is on `vendor_profiles`. No product, inventory, cart, reservation, order, payment, coupon, return, review, payout, market, video-call, or notification tables exist in this schema.
+Vendor application transitions and audit records are written by the vendor review service. Approval status is not a property of a user account: vendor status is on `vendor_profiles`. Vendor applications also store a validated mobile-money payout number and reference uploaded application files through `vendor_application_files`. Files are stored outside PostgreSQL under the server's private `.data/vendor-files` directory; PostgreSQL stores only the generated storage key and validated metadata.
+
+Commerce persists stock reservations, parent marketplace orders, vendor sub-orders, order lines, payment records, and review/refund workflow data. `simulated_payment_attempts` records every mock outcome with an explicit simulated flag and masked phone number; `payment_receipts` stores one receipt per successful simulated order. `sms_outbox_messages` records bilingual message content with statuses such as `SAVED_TO_OUTBOX`; it is not a delivery queue and never calls an SMS provider. Successful payment records vendor sales, commission, delivery fees, and vendor-funded discounts in the append-only ledger using the order's commission snapshots. Commission rules use the nearest active category ancestor, then the configured default; seed data creates explicit overrides only for configured root categories and deactivates untouched seeded child defaults with audit/history records. Payout eligibility still requires delivery, more than seven days since the recorded delivery time, and no blocking return. All payout records are simulated. See the Prisma schema for exact columns and relations.
+
+`product_reviews.orderLineId` is unique, so an order item can have at most one review. Hidden reviews remain stored and are excluded from public ratings. Return requests store a positive quantity and index by order item/status; transaction-level checks use the vendor order's recorded delivery time and reserve outstanding quantities. Each return refund is unique by return request. The partial unique index on `(vendorOrderId, reason)` applies only to refunds without a return request, preserving idempotency for expiry/cancellation refunds without blocking multiple product returns. Simulated refunds, compensating ledger entries, and payment-state changes are committed transactionally, and the parent payment is marked reversed only after cumulative refunds reach its captured amount.
+
+Products with customer-selectable options persist JSON attributes on each `ProductVariant`. Products without options are represented by one internal standard inventory variant so cart, reservation, and order stock/pricing remain consistent. No category-specific database schema is needed; option suggestions derive from the active database category and subcategory names/slugs.
 
 ## Append-only migration history
 
@@ -125,9 +130,23 @@ Vendor application transitions and audit records are written by the vendor revie
 | `20261104163724_foundation_auth` | Users, provider accounts, sessions, and audit logs |
 | `20261104165629_authentication_security` | Email codes, admin MFA/recovery, and login attempts |
 | `20261105114500_vendor_onboarding_and_auth_hardening` | Role-scoped provider accounts, admin challenges, vendor profiles, and database checks |
+| `20261105183000_vendor_changes_requested_status` | Renames `NEEDS_INFORMATION` to `CHANGES_REQUESTED` without dropping data |
+| `20261105201000_vendor_location_fields` | Adds nullable vendor application district data |
+| `20261106072000_vendor_application_documents` | Adds private vendor application document metadata |
+| `20261106090000_vendor_application_emails` | Tracks vendor application email attempts and outcomes |
+| `20261106100000_auth_refresh_tokens` | Adds persistent refresh-token session support |
+| `20261106103000_product_catalog` | Adds categories, products, variants, and product images |
+| `20261106110000_bilingual_catalog` | Adds Somali catalogue fields |
+| `20261106120000_vendor_profile_change_requests` | Adds reviewed vendor profile changes and associated files |
+| `20261106130000_marketplace_commerce` | Adds customer/vendor commerce and notification records |
+| `20261106140000_marketplace_workflow` | Adds marketplace workflow state and review records |
+| `20261106153000_admin_notifications` | Adds persisted administrator notifications |
+| `20261106170000_simulated_payment_receipts_sms` | Adds simulated payment attempts, receipts, and SMS outbox messages |
+| `20261106180000_customer_order_reviews_returns` | Adds customer notification links, quantity-aware returns, refund idempotency, and review/return indexes |
+| `20261106190000_commission_financial_foundation` | Adds commission snapshots/history, append-only ledger references, payout batches, and payout allocations |
 
-The third migration evolves the earlier provider-account uniqueness and foreign-key design in-place while preserving records. Do not edit or delete applied migrations. Create a new migration for future schema changes; do not use `db push` to bypass migration history.
+Migrations evolve the schema in-place while preserving records. Do not edit or delete applied migrations. Create a new migration for future schema changes; do not use `db push` to bypass migration history.
 
 ## Not yet implemented
 
-The marketplace business domains beyond vendor onboarding are not represented in the current schema. Products/catalogue, markets as records, inventory, carts, checkout/reservations, orders, payments, coupons, returns/refunds, financial ledgers/payouts, reviews, video calls, and notifications require approved models and migrations before their functionality is implemented. Their prior proposed designs are not current database entities.
+Additional marketplace requirements should be checked against the current schema before implementation. Features not represented there require approved models and migrations; do not treat proposed designs as existing database entities.

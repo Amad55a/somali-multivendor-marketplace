@@ -297,19 +297,24 @@ function encryptSecret(secret: string): string {
 function decryptSecret(encryptedSecret: string): string {
   const [ivValue, tagValue, ciphertextValue] = encryptedSecret.split(".");
   if (!ivValue || !tagValue || !ciphertextValue) {
-    throw new Error("Stored MFA secret has an invalid format.");
+    throw storedMfaSecretUnavailable();
   }
 
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    getAdminMfaEncryptionKey(),
-    Buffer.from(ivValue, "base64url"),
-  );
-  decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(ciphertextValue, "base64url")),
-    decipher.final(),
-  ]).toString("utf8");
+  const key = getAdminMfaEncryptionKey();
+  try {
+    const decipher = createDecipheriv(
+      "aes-256-gcm",
+      key,
+      Buffer.from(ivValue, "base64url"),
+    );
+    decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+    return Buffer.concat([
+      decipher.update(Buffer.from(ciphertextValue, "base64url")),
+      decipher.final(),
+    ]).toString("utf8");
+  } catch {
+    throw storedMfaSecretUnavailable();
+  }
 }
 
 function isTotpValid(
@@ -317,14 +322,28 @@ function isTotpValid(
   token: string,
   email: string,
 ): boolean {
-  const totp = new OTPAuth.TOTP({
-    issuer: "Somsuuq",
-    label: email,
-    secret: OTPAuth.Secret.fromBase32(decryptSecret(encryptedSecret)),
-    digits: 6,
-    period: 30,
-  });
+  const secret = decryptSecret(encryptedSecret);
+  let totp: OTPAuth.TOTP;
+  try {
+    totp = new OTPAuth.TOTP({
+      issuer: "Somsuuq",
+      label: email,
+      secret: OTPAuth.Secret.fromBase32(secret),
+      digits: 6,
+      period: 30,
+    });
+  } catch {
+    throw storedMfaSecretUnavailable();
+  }
   return totp.validate({ token, window: 1 }) !== null;
+}
+
+function storedMfaSecretUnavailable(): AppError {
+  return new AppError(
+    "ADMIN_MFA_SECRET_UNAVAILABLE",
+    503,
+    "The stored administrator MFA secret could not be decrypted. Confirm that ADMIN_MFA_ENCRYPTION_KEY matches the key used during enrollment; do not rotate it.",
+  );
 }
 
 function safeAdmin(user: User) {

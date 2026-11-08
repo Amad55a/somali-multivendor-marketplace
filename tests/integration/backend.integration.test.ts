@@ -8,6 +8,12 @@ const mailbox = vi.hoisted(() => ({
     code: string;
     purpose: string;
   }>,
+  vendorMessages: [] as Array<{
+    email: string;
+    event: string;
+    displayName: string;
+    detail?: string;
+  }>,
 }));
 
 vi.mock("server-only", () => ({}));
@@ -16,6 +22,16 @@ vi.mock("@/features/auth/email", () => ({
   sendOneTimeCode: vi.fn(
     async (email: string, code: string, purpose: string) => {
       mailbox.messages.push({ email, code, purpose });
+    },
+  ),
+  sendVendorApplicationEmail: vi.fn(
+    async (email: string, event: string, displayName: string, detail?: string) => {
+      mailbox.vendorMessages.push({
+        email,
+        event,
+        displayName,
+        ...(detail ? { detail } : {}),
+      });
     },
   ),
 }));
@@ -67,6 +83,7 @@ const rateLimitHashes: string[] = [];
 
 beforeEach(() => {
   mailbox.messages.length = 0;
+  mailbox.vendorMessages.length = 0;
 });
 
 afterEach(() => {
@@ -306,10 +323,14 @@ describe("customer and vendor authentication", () => {
 describe("administrator authentication and MFA", () => {
   it("requires email OTP and TOTP, encrypts the secret, and consumes recovery codes once", async () => {
     const admin = await createAdmin(uniqueEmail());
+    const otherAdmin = await createAdmin(uniqueEmail());
     const secret = new OTPAuth.Secret({ size: 20 }).base32;
 
     await beginAdminLogin(admin.email, "admin-password-long-enough");
     const firstEmailCode = lastCode(admin.email, "ADMIN_LOGIN");
+    await expect(
+      verifyAdminEmail(otherAdmin.email, firstEmailCode),
+    ).rejects.toMatchObject({ code: "INVALID_ADMIN_CHALLENGE" });
     const setupChallenge = await verifyAdminEmail(admin.email, firstEmailCode);
     expect(setupChallenge.mfaRequired).toBe(false);
     await setupAdminMfa(setupChallenge.challengeId, secret);
@@ -350,6 +371,34 @@ describe("administrator authentication and MFA", () => {
     const secondChallenge = await verifyAdminEmail(admin.email, secondEmailCode);
     expect(secondChallenge.mfaRequired).toBe(true);
 
+    const otherTotp = new OTPAuth.TOTP({
+      issuer: "Somsuuq",
+      label: otherAdmin.email,
+      secret: new OTPAuth.Secret({ size: 20 }),
+      digits: 6,
+      period: 30,
+    });
+    await expect(
+      verifyAdminMfa(
+        secondChallenge.challengeId,
+        totp.generate({ timestamp: Date.now() - 2 * 60 * 1000 }),
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_MFA_CODE" });
+    await expect(
+      verifyAdminMfa(secondChallenge.challengeId, otherTotp.generate()),
+    ).rejects.toMatchObject({ code: "INVALID_MFA_CODE" });
+
+    const configuredKey = process.env.ADMIN_MFA_ENCRYPTION_KEY;
+    if (!configuredKey) throw new Error("Integration MFA key was not configured.");
+    vi.stubEnv("ADMIN_MFA_ENCRYPTION_KEY", "f".repeat(64));
+    await expect(
+      verifyAdminMfa(secondChallenge.challengeId, totp.generate()),
+    ).rejects.toMatchObject({
+      code: "ADMIN_MFA_SECRET_UNAVAILABLE",
+      status: 503,
+    });
+    vi.stubEnv("ADMIN_MFA_ENCRYPTION_KEY", configuredKey);
+
     const secondLogin = await verifyAdminMfa(
       secondChallenge.challengeId,
       totp.generate(),
@@ -373,21 +422,25 @@ describe("administrator authentication and MFA", () => {
       verifyAdminMfa(replayChallenge.challengeId, enrollment.recoveryCodes[0]),
     ).rejects.toMatchObject({ code: "INVALID_MFA_CODE" });
 
-    const session = await prisma.userSession.findFirstOrThrow({
-      where: { userId: admin.id, revokedAt: null },
-      orderBy: { createdAt: "desc" },
-    });
+    const recoveryAdmin = await requireUser(
+      sessionRequest(recoveryLogin.session.token),
+      ["ADMIN"],
+    );
     await prisma.userSession.update({
-      where: { id: session.id },
-      data: { lastActivityAt: new Date(Date.now() - 11 * 60 * 1000) },
+      where: { id: recoveryAdmin.sessionId },
+      data: { lastActivityAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000) },
     });
     const expiredAdmin = await prisma.userSession.findUniqueOrThrow({
-      where: { id: session.id },
+      where: { id: recoveryAdmin.sessionId },
     });
+    expect(expiredAdmin.expiresAt.getTime()).toBeGreaterThan(Date.now());
     await expect(
       requireUser(sessionRequest(recoveryLogin.session.token)),
     ).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
-    expect(expiredAdmin.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    const revokedAdmin = await prisma.userSession.findUniqueOrThrow({
+      where: { id: recoveryAdmin.sessionId },
+    });
+    expect(revokedAdmin.revokedAt).toBeInstanceOf(Date);
   });
 });
 
@@ -396,7 +449,7 @@ describe("vendor onboarding and admin review", () => {
     const reviewer = await createAdmin(uniqueEmail());
     const reviewerPrincipal = principal(reviewer.id, reviewer.email, "ADMIN");
     const pendingVendor = await createVerifiedVendor();
-    const pending = await createDraft(pendingVendor, completeApplication("Pending Store"));
+    const pending = await createCompleteDraft(pendingVendor, "Pending Store");
     entityIds.push(pending.application.id);
     await submitApplication(pendingVendor);
 
@@ -423,10 +476,7 @@ describe("vendor onboarding and admin review", () => {
     });
 
     const approvedVendor = await createVerifiedVendor();
-    const application = await createDraft(
-      approvedVendor,
-      completeApplication("Approved Store"),
-    );
+    const application = await createCompleteDraft(approvedVendor, "Approved Store");
     entityIds.push(application.application.id);
     await submitApplication(approvedVendor);
     await reviewApplication(
@@ -466,6 +516,50 @@ describe("vendor onboarding and admin review", () => {
         "VENDOR_SUSPENDED",
       ]),
     );
+    expect(mailbox.vendorMessages.map(({ event }) => event)).toEqual([
+      "SUBMITTED",
+      "CHANGES_REQUESTED",
+      "SUBMITTED",
+      "REJECTED",
+      "SUBMITTED",
+      "APPROVED",
+    ]);
+    expect(mailbox.vendorMessages.find(({ event }) => event === "REJECTED")).toMatchObject({
+      email: pendingVendor.email,
+      detail: "Business details could not be confirmed.",
+    });
+
+    const notifications = await prisma.adminNotification.findMany({
+      where: { entityId: { in: [pending.application.id, application.application.id] } },
+      select: { entityId: true, type: true, readAt: true },
+    });
+    const notificationSummary = notifications
+      .map(({ entityId, type, readAt }) => ({ entityId, type, readAt }))
+      .sort((left, right) =>
+        (left.entityId ?? "").localeCompare(right.entityId ?? "") ||
+        left.type.localeCompare(right.type),
+      );
+    const expectedNotifications = [
+      {
+        entityId: pending.application.id,
+        type: "VENDOR_APPLICATION_SUBMITTED",
+        readAt: null,
+      },
+      {
+        entityId: pending.application.id,
+        type: "VENDOR_APPLICATION_SUBMITTED",
+        readAt: null,
+      },
+      {
+        entityId: application.application.id,
+        type: "VENDOR_APPLICATION_SUBMITTED",
+        readAt: null,
+      },
+    ].sort((left, right) =>
+      (left.entityId ?? "").localeCompare(right.entityId ?? "") ||
+      left.type.localeCompare(right.type),
+    );
+    expect(notificationSummary).toEqual(expectedNotifications);
   });
 
   it("protects admin routes from missing and customer sessions", async () => {
@@ -517,7 +611,7 @@ describe("Amazon OAuth and rate limiting", () => {
       fetchMock,
     );
     expect(customerCallback.status).toBe(303);
-    expect(customerCallback.headers.get("location")).toContain("/en/customer/account");
+    expect(customerCallback.headers.get("location")).toContain("/en/customer/dashboard");
     expect(customerCallback.headers.get("set-cookie")).toContain("marketplace_session=");
 
     const customer = await prisma.user.findUniqueOrThrow({
@@ -529,7 +623,7 @@ describe("Amazon OAuth and rate limiting", () => {
       },
     });
     userIds.push(customer.id);
-    expect(customer.emailVerifiedAt).toBeNull();
+    expect(customer.emailVerifiedAt).toBeInstanceOf(Date);
 
     const customerLogin = await completeAmazonFlow(
       "CUSTOMER",
@@ -538,7 +632,7 @@ describe("Amazon OAuth and rate limiting", () => {
       fetchMock,
     );
     expect(customerLogin.headers.get("set-cookie")).toContain("marketplace_session=");
-    expect(customerLogin.headers.get("location")).toContain("/en/customer/account");
+    expect(customerLogin.headers.get("location")).toContain("/en/customer/dashboard");
 
     const vendorCallback = await completeAmazonFlow(
       "VENDOR",
@@ -557,7 +651,7 @@ describe("Amazon OAuth and rate limiting", () => {
       },
     });
     userIds.push(vendor.id);
-    expect(vendor.emailVerifiedAt).toBeNull();
+    expect(vendor.emailVerifiedAt).toBeInstanceOf(Date);
 
     const identities = await prisma.userAuthAccount.findMany({
       where: { provider: "AMAZON", providerAccountId: amazonId },
@@ -598,6 +692,31 @@ describe("Amazon OAuth and rate limiting", () => {
 async function createVerifiedVendor(): Promise<AuthenticatedUser> {
   const account = await createVerifiedAccount("VENDOR", uniqueEmail());
   return principal(account.id, account.email, "VENDOR");
+}
+
+async function createCompleteDraft(user: AuthenticatedUser, storeName: string) {
+  const draft = await createDraft(user, completeApplication(storeName));
+  await prisma.vendorApplicationFile.createMany({
+    data: [
+      {
+        vendorProfileId: draft.application.id,
+        fileType: "STORE_LOGO",
+        storageKey: `integration/${randomUUID()}/store-logo.png`,
+        originalName: "store-logo.png",
+        mimeType: "image/png",
+        sizeBytes: 1,
+      },
+      {
+        vendorProfileId: draft.application.id,
+        fileType: "BUSINESS_LICENSE",
+        storageKey: `integration/${randomUUID()}/business-license.pdf`,
+        originalName: "business-license.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+      },
+    ],
+  });
+  return draft;
 }
 
 async function createVerifiedCustomer() {
@@ -661,6 +780,7 @@ function completeApplication(storeName: string) {
     city: "Mogadishu",
     address: "Market district",
     marketAssociation: "Local market",
+    mobileMoneyNumber: "+252611234567",
   };
 }
 

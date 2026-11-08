@@ -73,7 +73,15 @@ export const emailAccountSchema = z
 export const verifyEmailSchema = z.object({ code: emailCodeSchema }).strict();
 
 export const resetPasswordSchema = emailAccountSchema
-  .extend({ code: emailCodeSchema, newPassword: passwordSchema })
+  .extend({
+    code: emailCodeSchema,
+    newPassword: passwordSchema,
+    confirmPassword: z.string().max(128),
+  })
+  .refine((value) => value.newPassword === value.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "Passwords do not match.",
+  })
   .strict();
 
 export const adminLoginSchema = z
@@ -118,10 +126,19 @@ export const applicationFieldsSchema = z
     businessType: z.string().trim().min(2).max(100).optional(),
     description: z.string().trim().max(2000).optional(),
     contactName: z.string().trim().min(2).max(160).optional(),
-    phone: z.string().trim().min(5).max(32).optional(),
+    phone: z.union([
+      z.string().trim().regex(/^\+[1-9]\d{6,14}$/),
+      z.literal(""),
+    ]).optional(),
+    mobileMoneyNumber: z.union([
+      z.string().trim().regex(/^\+[1-9]\d{6,14}$/),
+      z.string().trim().regex(/^0\d{6,14}$/),
+      z.literal(""),
+    ]).optional(),
     country: z.string().trim().min(2).max(100).optional(),
     region: z.string().trim().min(2).max(100).optional(),
     city: z.string().trim().min(2).max(100).optional(),
+    district: z.string().trim().min(2).max(100).optional(),
     address: z.string().trim().max(300).optional(),
     marketAssociation: z.string().trim().max(200).optional(),
   })
@@ -143,13 +160,42 @@ export const requestInformationSchema = z
   .object({ message: z.string().trim().min(3).max(1000) })
   .strict();
 
+export const vendorEmailEventSchema = z.enum([
+  "SUBMITTED",
+  "APPROVED",
+  "REJECTED",
+  "CHANGES_REQUESTED",
+  "PROFILE_CHANGE_SUBMITTED",
+  "PROFILE_CHANGE_APPROVED",
+  "PROFILE_CHANGE_REJECTED",
+]);
+
+export const vendorApplicationEmailRetrySchema = z
+  .object({
+    event: vendorEmailEventSchema,
+  })
+  .strict();
+
+export const profileChangeFieldsSchema = applicationFieldsSchema.extend({
+  displayName: z.string().trim().min(2).max(160).optional(),
+  vendorNote: z.string().trim().max(1000).optional(),
+});
+
+export const submitProfileChangeSchema = profileChangeFieldsSchema.extend({
+  recaptchaToken: z.string().trim().min(1).max(4096),
+});
+
+export const reviewProfileChangeSchema = z
+  .object({ note: z.string().trim().max(1000).optional() })
+  .strict();
+
 export const suspendVendorSchema = rejectApplicationSchema;
 
 export const vendorApplicationStatusSchema = z.enum([
   "DRAFT",
   "PENDING",
   "UNDER_REVIEW",
-  "NEEDS_INFORMATION",
+  "CHANGES_REQUESTED",
   "APPROVED",
   "REJECTED",
   "SUSPENDED",
@@ -158,6 +204,25 @@ export const vendorApplicationStatusSchema = z.enum([
 export const applicationListQuerySchema = z
   .object({
     status: vendorApplicationStatusSchema.optional(),
+    search: z.string().trim().max(100).optional(),
+    cursor: z.uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(20),
+  })
+  .strict();
+
+export const adminUsersQuerySchema = z
+  .object({
+    accountType: z.enum(["CUSTOMER", "VENDOR", "ADMIN"]).optional(),
+    active: z.enum(["ACTIVE", "INACTIVE"]).optional(),
+    vendorStatus: vendorApplicationStatusSchema.optional(),
+    search: z.string().trim().max(100).optional(),
+    cursor: z.uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(20),
+  })
+  .strict();
+
+export const adminAuditLogsQuerySchema = z
+  .object({
     cursor: z.uuid().optional(),
     limit: z.coerce.number().int().min(1).max(50).default(20),
   })

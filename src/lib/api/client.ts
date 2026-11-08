@@ -15,7 +15,9 @@ export async function requestApi<T>(
   init: RequestInit = {},
 ): Promise<T> {
   const headers = new Headers(init.headers);
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+  if (init.body !== undefined && !(init.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
 
   const response = await fetch(path, {
     ...init,
@@ -59,6 +61,10 @@ export async function requestApi<T>(
 
 export function postJson(body: unknown): Pick<RequestInit, "method" | "body"> {
   return { method: "POST", body: JSON.stringify(body) };
+}
+
+export function postFormData(body: FormData): Pick<RequestInit, "method" | "body"> {
+  return { method: "POST", body };
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

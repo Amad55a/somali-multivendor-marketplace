@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ProviderId } from "abuur-ai";
 import { AppError } from "@/lib/errors/app-error";
 
 const optionalValue = z.preprocess(
@@ -74,6 +75,27 @@ const mfaEnvSchema = z.object({
 const recaptchaEnvSchema = z.object({
   RECAPTCHA_SECRET_KEY: optionalValue,
   RECAPTCHA_MIN_SCORE: z.coerce.number().min(0).max(1).default(0.5),
+});
+
+const abuurAIProviders = [
+  "openai",
+  "gemini",
+  "anthropic",
+  "mistral",
+  "deepseek",
+  "cohere",
+  "xai",
+  "openrouter",
+  "ollama",
+  "perplexity",
+  "meta",
+  "nvidia",
+] as const satisfies readonly ProviderId[];
+
+const abuurAIEnvSchema = z.object({
+  ABUUR_AI_PROVIDER: z.enum(abuurAIProviders).optional(),
+  ABUUR_AI_MODEL: optionalValue,
+  ABUUR_AI_API_KEY: optionalValue,
 });
 
 function parseServerConfig<TSchema extends z.ZodType>(
@@ -236,6 +258,23 @@ function decodeMfaEncryptionKey(value: string): Uint8Array {
     : Buffer.from(value, "base64");
 }
 
+export function simulatedPaymentsAllowed(): boolean {
+  if (process.env.NODE_ENV === "production") return false;
+  return process.env.SIMULATED_PAYMENTS_ENABLED !== "false";
+}
+
+export function assertMockPaymentAdapterConfigured() {
+  const adapter = process.env.SIMULATED_PAYMENT_ADAPTER ?? "mock";
+  if (adapter !== "mock") {
+    console.error("[config] Unsupported payment adapter selected", { adapter });
+    throw new AppError(
+      "PAYMENT_ADAPTER_UNAVAILABLE",
+      503,
+      "Only the mock payment adapter is available; no real payment provider is configured.",
+    );
+  }
+}
+
 export function getRecaptchaConfig() {
   const parsed = parseServerConfig(
     recaptchaEnvSchema,
@@ -261,5 +300,40 @@ export function getRecaptchaConfig() {
     secretKey: parsed.RECAPTCHA_SECRET_KEY,
     minimumScore: parsed.RECAPTCHA_MIN_SCORE,
     expectedHostname: new URL(getAuthConfig().appUrl).hostname.toLowerCase(),
+  };
+}
+
+export function getAbuurAIConfig() {
+  const parsed = parseServerConfig(
+    abuurAIEnvSchema,
+    {
+      ABUUR_AI_PROVIDER: process.env.ABUUR_AI_PROVIDER,
+      ABUUR_AI_MODEL: process.env.ABUUR_AI_MODEL,
+      ABUUR_AI_API_KEY: process.env.ABUUR_AI_API_KEY,
+    },
+    "Abuur AI",
+  );
+  const requiresApiKey = parsed.ABUUR_AI_PROVIDER !== "ollama";
+  const apiKeyIsPlaceholder =
+    parsed.ABUUR_AI_API_KEY !== undefined &&
+    /^(?:your|replace|placeholder|example)(?:[_-]|$)/i.test(
+      parsed.ABUUR_AI_API_KEY,
+    );
+
+  if (
+    !parsed.ABUUR_AI_PROVIDER ||
+    !parsed.ABUUR_AI_MODEL ||
+    (requiresApiKey && (!parsed.ABUUR_AI_API_KEY || apiKeyIsPlaceholder))
+  ) {
+    return { available: false as const };
+  }
+
+  return {
+    available: true as const,
+    provider: parsed.ABUUR_AI_PROVIDER,
+    model: parsed.ABUUR_AI_MODEL,
+    ...(parsed.ABUUR_AI_API_KEY
+      ? { apiKey: parsed.ABUUR_AI_API_KEY }
+      : {}),
   };
 }

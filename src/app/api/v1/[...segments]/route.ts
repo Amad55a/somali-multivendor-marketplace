@@ -16,3 +16,8 @@ export async function PATCH(request: Request, context: RouteContext) {
   const { segments } = await context.params;
   return dispatchApiRequest(request, segments);
 }
+
+export async function DELETE(request: Request, context: RouteContext) {
+  const { segments } = await context.params;
+  return dispatchApiRequest(request, segments);
+}

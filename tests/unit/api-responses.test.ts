@@ -37,6 +37,19 @@ describe("API response helpers", () => {
     });
   });
 
+  it("reports a database schema mismatch without assuming migrations are pending", async () => {
+    const error = Object.assign(new Error("table does not exist"), { code: "P2021" });
+    const response = apiErrorResponse(error);
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "DATABASE_SCHEMA_OUTDATED",
+        message: "The database schema is incompatible with this application version.",
+      },
+    });
+  });
+
   it("returns field-only validation details", async () => {
     const schema = z.object({ password: z.string().min(12) }).strict();
     const parsed = schema.safeParse({ password: "short", privateValue: "do-not-return" });

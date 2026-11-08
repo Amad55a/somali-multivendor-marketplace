@@ -6,6 +6,41 @@ import type { AccountType } from "../../../generated/prisma/client";
 import { isLocale, type Locale } from "@/i18n/config";
 import { AppError } from "@/lib/errors/app-error";
 import { requireUser } from "@/features/auth/sessions";
+import { assertApprovedVendor } from "@/features/vendors/service";
+
+export async function redirectAuthenticatedPage(localeValue: string) {
+  if (!isLocale(localeValue)) redirect("/en");
+  const cookieStore = await cookies();
+  const cookieHeader = cookieStore
+    .getAll()
+    .map(({ name, value }) => `${name}=${value}`)
+    .join("; ");
+  const request = new Request("https://somsuuq.internal/", {
+    headers: { cookie: cookieHeader },
+  });
+
+  try {
+    const user = await requireUser(request);
+    if (user.accountType === "ADMIN") {
+      redirect(`/${localeValue}/admin/overview`);
+    }
+    if (user.accountType === "VENDOR") {
+      try {
+        await assertApprovedVendor(user.id, user.accountType);
+        redirect(`/${localeValue}/vendor/dashboard`);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "VENDOR_NOT_APPROVED") {
+          redirect(`/${localeValue}/vendor/status`);
+        }
+        throw error;
+      }
+    }
+    redirect(`/${localeValue}/customer/dashboard`);
+  } catch (error) {
+    if (error instanceof AppError && error.status === 401) return;
+    throw error;
+  }
+}
 
 export async function requirePageAccount(
   accountType: AccountType,

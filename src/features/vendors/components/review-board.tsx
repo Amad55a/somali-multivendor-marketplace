@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { z } from "zod";
 import { useTranslation } from "@/i18n/hooks/use-translation";
@@ -17,6 +18,7 @@ const reviewApplicationSchema = z.object({
   city: z.string().nullable(),
   region: z.string().nullable(),
   submittedAt: z.string().nullable(),
+  pendingProfileChange: z.boolean().optional(),
   user: z.object({ id: z.string(), email: z.string() }),
 });
 const listSchema = z.object({
@@ -27,10 +29,13 @@ const reviewedSchema = z.object({ application: z.object({ id: z.string() }) });
 type ReviewApplication = z.infer<typeof reviewApplicationSchema>;
 
 export function ReviewBoard() {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [applications, setApplications] = useState<ReviewApplication[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,6 +43,8 @@ export function ReviewBoard() {
   const fetchPage = useCallback(
     (nextCursor?: string) => {
       const query = new URLSearchParams({ limit: "50" });
+      if (statusFilter !== "ALL") query.set("status", statusFilter);
+      if (search) query.set("search", search);
       if (nextCursor) query.set("cursor", nextCursor);
       return requestApi(
         `/api/v1/admin/vendors/applications?${query}`,
@@ -45,7 +52,7 @@ export function ReviewBoard() {
         t("auth.requestFailed"),
       );
     },
-    [t],
+    [search, statusFilter, t],
   );
 
   useEffect(() => {
@@ -89,13 +96,28 @@ export function ReviewBoard() {
     [fetchPage, t],
   );
 
-  async function review(application: ReviewApplication, action: string) {
+  async function review(
+    application: ReviewApplication,
+    action: "approve" | "reject" | "request-information" | "suspend",
+  ) {
     const text = notes[application.id]?.trim() ?? "";
     if (
       (action === "reject" || action === "request-information" || action === "suspend") &&
       !text
     ) {
       setError(t("auth.reviewReason"));
+      return;
+    }
+    if (
+      action === "approve" &&
+      !window.confirm(t("admin.applications.confirmApprove"))
+    ) {
+      return;
+    }
+    if (
+      action === "reject" &&
+      !window.confirm(t("admin.applications.confirmReject"))
+    ) {
       return;
     }
 
@@ -146,13 +168,60 @@ export function ReviewBoard() {
         </button>
       </div>
 
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          setSearch(searchInput.trim());
+        }}
+        className="mt-5 grid gap-3 rounded-xl border border-[#e1e9e5] bg-white p-4 sm:grid-cols-[minmax(0,1fr)_14rem_auto]"
+      >
+        <label className="grid gap-1 text-sm font-medium text-[#123b35]">
+          {t("admin.applications.search")}
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder={t("admin.applications.searchPlaceholder")}
+            className="min-h-10 rounded-lg border border-[#d5dfda] px-3 text-sm"
+          />
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-[#123b35]">
+          {t("admin.applications.statusFilter")}
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className="min-h-10 rounded-lg border border-[#d5dfda] bg-white px-3 text-sm"
+          >
+            <option value="ALL">{t("admin.applications.allSubmitted")}</option>
+            {[
+              "PENDING",
+              "UNDER_REVIEW",
+              "CHANGES_REQUESTED",
+              "APPROVED",
+              "REJECTED",
+              "SUSPENDED",
+            ].map((status) => (
+              <option key={status} value={status}>
+                {statusLabel(status, t)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="submit"
+          className="self-end rounded-lg bg-[#123b35] px-4 py-2.5 text-sm font-semibold text-white"
+        >
+          {t("admin.applications.search")}
+        </button>
+      </form>
+
       {error && <p role="alert" className="mt-5 text-sm text-red-700">{error}</p>}
       {loading && applications.length === 0 && (
         <p className="mt-6 text-sm text-slate-600">{t("header.searchLoading")}</p>
       )}
       {!loading && applications.length === 0 && (
         <p className="mt-6 rounded-xl bg-white p-5 text-sm text-slate-600">
-          {t("auth.status.pending")}: 0
+          {t("admin.applications.noResults")}
         </p>
       )}
 
@@ -169,16 +238,32 @@ export function ReviewBoard() {
             >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-bold text-[#123b35]">
+                  <Link
+                    href={`/${locale}/admin/vendors/applications/${application.id}`}
+                    className="text-lg font-bold text-[#123b35] hover:underline"
+                  >
                     {application.storeName ?? application.businessName}
-                  </h2>
+                  </Link>
                   <p className="mt-1 text-sm text-slate-600">
                     {application.businessName} · {application.businessType}
                   </p>
                 </div>
-                <span className="rounded-full bg-[#f5f8f6] px-3 py-1 text-xs font-semibold text-[#123b35]">
-                  {statusLabel(application.applicationStatus, t)}
-                </span>
+                <Link
+                  href={`/${locale}/admin/vendors/applications/${application.id}`}
+                  className="mt-3 inline-flex text-sm font-semibold text-[#8b5e08] hover:underline"
+                >
+                  {t("admin.applications.viewDetails")}
+                </Link>
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-full bg-[#f5f8f6] px-3 py-1 text-xs font-semibold text-[#123b35]">
+                    {statusLabel(application.applicationStatus, t)}
+                  </span>
+                  {application.pendingProfileChange && (
+                    <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900">
+                      {t("vendor.pendingReview")}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
@@ -301,7 +386,7 @@ function statusLabel(
     DRAFT: "auth.status.draft",
     PENDING: "auth.status.pending",
     UNDER_REVIEW: "auth.status.underReview",
-    NEEDS_INFORMATION: "auth.status.needsInformation",
+    CHANGES_REQUESTED: "auth.status.changesRequested",
     APPROVED: "auth.status.approved",
     REJECTED: "auth.status.rejected",
     SUSPENDED: "auth.status.suspended",

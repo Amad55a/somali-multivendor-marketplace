@@ -4,11 +4,15 @@
 
 - Next.js App Router, strict TypeScript, PostgreSQL, Prisma ORM 7, and Zod validation.
 - Customer/vendor authentication, Amazon OAuth, email verification, password reset, session revocation, administrator OTP/TOTP/recovery-code flows, and vendor onboarding/review are implemented.
-- The application has a single access JWT held in an HttpOnly cookie; it does not implement refresh tokens.
+- The application uses a short-lived access JWT and a separate rotating refresh token, both held only in HttpOnly cookies. Refresh tokens are stored as hashes in `UserSession` and expire after a bounded persistent-session window.
 - API route dispatch is handled by `src/app/api/v1/[...segments]/route.ts`; the shared registry and request/response contracts are in `src/lib/api/v1.ts`.
 - OpenAPI 3.0.3 is generated from that registry and served at `/api/openapi.json`; Swagger UI is served at `/api-docs`.
-- Prisma models and migrations cover authentication, administrator security, and vendor onboarding only. Products, orders, payments, and other marketplace transaction domains are not implemented.
+- Prisma models and migrations cover authentication, administrator security, vendor onboarding, product catalogue, marketplace orders, stock reservations, simulated mobile-money payment attempts and receipts, notifications, and an SMS outbox. Payments and SMS are simulation-only; no real provider integrations are implemented.
+- Customer, vendor, and administrator screens use authenticated, visibility-aware polling and App Router refreshes for changing counts, orders, stock, and analytics. Polling pauses in hidden tabs and refreshes on visibility, focus, or reconnect.
+- Checkout reservations are based on server timestamps, validated again on every payment, and expired by both normal server-side commerce requests and the scheduled `/api/cron/marketplace` job. Production cron requests require `CRON_SECRET`.
 - The approved storefront homepage is implemented under `src/features/homepage` and served under the locale routes.
+
+When developing through ngrok, keep the local Next.js server and the current ngrok tunnel running. Cookies are host-only (and production cookies use the `__Host-` prefix), so changing the tunnel hostname starts a new cookie scope; HTTPS must remain enabled for production-like secure-cookie testing.
 
 ## Boundaries
 
@@ -20,6 +24,9 @@ src/
   features/
     auth/               Authentication, OAuth, email, MFA, OTP, and session services
     vendors/            Vendor onboarding, review, and related UI
+    products/           Public catalogue, product details, and reviews
+    commerce/           Cart, reservation-backed orders, simulated payment and SMS outbox
+    customer/           Customer profile and marketplace UI
     homepage/           Approved storefront homepage
   i18n/                 Locale dictionaries, types, and routing support
   lib/
@@ -59,7 +66,7 @@ Keep route handlers thin: validate inputs, enforce authentication/authorization,
 
 - `prisma/schema.prisma` is the application model source of truth; Prisma ORM 7 configuration is in `prisma7.config.ts`.
 - Use `src/lib/prisma.ts` for the shared generated Prisma client and PostgreSQL adapter.
-- The configured development database was compared with the Prisma schema on 2026-11-05: all three migrations were applied and Prisma reported no schema diff. This is not a guarantee about CI, staging, or production.
+- The configured development database was checked after the simulated-payment migration was deployed: all 15 migrations were applied. This is not a guarantee about CI, staging, or production.
 - Preserve applied migration history. Make schema changes through new versioned migrations; do not reset a database or use `db push` to bypass migration history.
 - Migration-managed PostgreSQL CHECK constraints for provider account types are not represented in Prisma schema syntax; see the database design document.
 - Keep secrets server-only and validate required environment variables. Never prefix secrets with `NEXT_PUBLIC_` or overwrite `.env` as part of implementation.
@@ -72,4 +79,4 @@ GitHub Actions provisions PostgreSQL 18, applies migrations to its isolated data
 
 ## Implemented and future domains
 
-Implemented database/API functionality is limited to authentication, administrator security, vendor onboarding, and vendor review. Product/catalogue, inventory, cart, checkout, orders, payments, coupons, returns, reviews, vendor payouts, market records, video calls, and notifications are future work. Do not represent these as existing tables or endpoints until implemented and migrated.
+Implemented database/API functionality includes authentication, administrator security, vendor onboarding and review, the product catalogue, marketplace commerce, and persisted administrator/vendor notifications. Consult the current Prisma schema and versioned migrations for the authoritative feature set; future proposals are not implemented unless represented there.
