@@ -19,6 +19,7 @@ Welcome to the Somsuuq API developer guide. Somsuuq provides a high-performance 
 | Guide | Description |
 |---|---|
 | [`docs/api/openapi.md`](./openapi.md) | How the OpenAPI specification is dynamically compiled, schema validation, and Swagger UI usage |
+| [`docs/api/COMPLETE_API_REFERENCE.md`](./COMPLETE_API_REFERENCE.md) | Full reference for implemented endpoints by domain, including auth, catalog, checkout, payouts, support, and moderation |
 | [`docs/api/authentication.md`](./authentication.md) | HttpOnly cookies, CSRF protection, OTP verification, Amazon OAuth, and Admin MFA |
 | [`docs/api/errors.md`](./errors.md) | Standardized error envelopes, HTTP status codes, validation issues, and domain error codes |
 | [`docs/api/financial-endpoints.md`](./financial-endpoints.md) | Commissions, payouts, ledger queries, simulated payment receipts, and reconciliation |

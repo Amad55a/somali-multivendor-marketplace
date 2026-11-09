@@ -8,7 +8,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useRouter } from "next/navigation";
 import { saveLocalePreference } from "@/i18n/save-locale-preference";
 import { isLocale, type Locale } from "@/i18n/config";
 import { createTranslator } from "@/i18n/get-dictionary";
@@ -35,7 +34,6 @@ export function LocaleProvider({
 }>) {
   const [isChangingLocale, setIsChangingLocale] = useState(false);
   const [changeFailed, setChangeFailed] = useState(false);
-  const router = useRouter();
   const t = useMemo(() => createTranslator(dictionary), [dictionary]);
 
   const setLocale = useCallback(
@@ -53,14 +51,16 @@ export function LocaleProvider({
       );
       const nextUrl = `${nextPath}${window.location.search}${window.location.hash}`;
       void saveLocalePreference(nextLocale)
-        .then(() => router.push(nextUrl))
+        .then(() => {
+          window.location.assign(nextUrl);
+        })
         .catch((error: unknown) => {
           console.error("Unable to save the language preference", error);
           setChangeFailed(true);
           setIsChangingLocale(false);
         });
     },
-    [locale, router],
+    [locale],
   );
 
   const contextValue = useMemo(

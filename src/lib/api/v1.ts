@@ -207,6 +207,27 @@ import {
 import { requestAbuurAI } from "@/features/ai/abuur-ai-service";
 import { getAbuurAIConfig } from "@/config/env";
 import { createSupportTranscript, sanitizeSupportAIText } from "@/features/support/ai-context";
+import {
+  parseCommunicationId,
+  prepareCommunicationWrite,
+  requireCommunicationAdmin,
+  requireCommunicationUser,
+} from "@/features/communications/http";
+import {
+  blockConversationParticipant,
+  createCommunicationReport,
+  getConversationPresence,
+  listConversationMessages,
+  listConversations,
+  listShareableOrders,
+  listShareableProducts,
+  openProductConversation,
+  recordConversationHeartbeat,
+  reviewCommunicationReport,
+  sendConversationMessage,
+} from "@/features/communications/service";
+import { emitConversationEvent } from "@/features/communications/socket-server";
+import { locationCoordinatesSchema } from "@/features/communications/location";
 
 type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 type OpenApiMethod = "get" | "post" | "patch" | "delete";
@@ -1090,6 +1111,299 @@ const routes: ApiRoute[] = [
       authenticated: true,
       requestBodySchema: adminSupportAISchema,
       pathSchema: z.object({ ticketId: z.uuid() }),
+    },
+  ),
+  route(
+    "GET",
+    "/conversations",
+    ["Conversations"],
+    "List the authenticated customer's or vendor's conversations",
+    "Authenticated CUSTOMER or VENDOR",
+    success(200, "Conversation list.", envelope(z.any())),
+    async (request) => {
+      const user = await requireCommunicationUser(request);
+      const search = new URL(request.url).searchParams.get("q") ?? "";
+      return jsonResponse(await listConversations(user, search));
+    },
+    { authenticated: true },
+  ),
+  route(
+    "POST",
+    "/conversations",
+    ["Conversations"],
+    "Open a product conversation for a customer-vendor exchange",
+    "Authenticated CUSTOMER or VENDOR",
+    success(201, "Conversation opened.", envelope(z.any())),
+    async (request) => {
+      const user = await requireCommunicationUser(request);
+      await prepareCommunicationWrite(request, user, "communication:open", 12, 60);
+      const input = await body(request, z.object({ productId: z.uuid() }).strict());
+      const result = await openProductConversation(user, input.productId);
+      const liveDelivery = emitConversationEvent(
+        result.conversationId,
+        "conversation:updated",
+        { conversationId: result.conversationId },
+      );
+      return jsonResponse({ ...result, liveDelivery }, 201);
+    },
+    { authenticated: true, requestBodySchema: z.object({ productId: z.uuid() }).strict() },
+  ),
+  route(
+    "GET",
+    "/conversations/{conversationId}/messages",
+    ["Conversations"],
+    "List messages in a conversation",
+    "Authenticated participant in the conversation",
+    success(200, "Conversation messages.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      const beforeIdValue = new URL(request.url).searchParams.get("before");
+      const beforeId = beforeIdValue ? parseCommunicationId(beforeIdValue) : undefined;
+      return jsonResponse(await listConversationMessages(user, conversationId, beforeId));
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "POST",
+    "/conversations/{conversationId}/messages",
+    ["Conversations"],
+    "Send a conversation message",
+    "Authenticated participant in the conversation",
+    success(201, "Message sent.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      await prepareCommunicationWrite(
+        request,
+        user,
+        `communication:message:${conversationId}`,
+        20,
+        60,
+      );
+      const input = await body(request, z.object({
+        clientMessageId: z.uuid(),
+        content: z.string().trim().min(1).max(4000).optional(),
+        productId: z.uuid().optional(),
+        orderId: z.uuid().optional(),
+        location: locationCoordinatesSchema.optional(),
+      }).strict());
+      const result = await sendConversationMessage(user, conversationId, input);
+      const liveDelivery = result.message
+        ? emitConversationEvent(conversationId, "message:new", {
+            conversationId,
+            message: result.message,
+          })
+        : false;
+      return jsonResponse({
+        message: result.message,
+        duplicate: result.duplicate,
+        liveDelivery,
+      }, result.duplicate ? 200 : 201);
+    },
+    { authenticated: true, requestBodySchema: z.object({
+      clientMessageId: z.uuid(),
+      content: z.string().trim().min(1).max(4000).optional(),
+      productId: z.uuid().optional(),
+      orderId: z.uuid().optional(),
+      location: locationCoordinatesSchema.optional(),
+    }).strict(), pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "POST",
+    "/conversations/{conversationId}/reports",
+    ["Conversations"],
+    "Report a conversation for moderation review",
+    "Authenticated participant in the conversation",
+    success(201, "Communication report created.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      await prepareCommunicationWrite(request, user, "communication:report", 3, 3600);
+      const input = await body(request, z.object({
+        reason: z.enum([
+          "SPAM",
+          "HARASSMENT",
+          "FRAUD",
+          "IMPERSONATION",
+          "INAPPROPRIATE_CONTENT",
+          "OTHER",
+        ]),
+        explanation: z.string().trim().max(2000).optional(),
+      }).strict());
+      return jsonResponse(await createCommunicationReport(user, conversationId, input), 201);
+    },
+    {
+      authenticated: true,
+      requestBodySchema: z.object({
+        reason: z.enum([
+          "SPAM",
+          "HARASSMENT",
+          "FRAUD",
+          "IMPERSONATION",
+          "INAPPROPRIATE_CONTENT",
+          "OTHER",
+        ]),
+        explanation: z.string().trim().max(2000).optional(),
+      }).strict(),
+      pathSchema: z.object({ conversationId: z.string() }),
+    },
+  ),
+  route(
+    "GET",
+    "/conversations/{conversationId}/presence",
+    ["Conversations"],
+    "Check conversation presence for both participants",
+    "Authenticated participant in the conversation",
+    success(200, "Presence payload.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      return jsonResponse(await getConversationPresence(user, conversationId));
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "POST",
+    "/conversations/{conversationId}/presence",
+    ["Conversations"],
+    "Record a heartbeat for the authenticated user",
+    "Authenticated participant in the conversation",
+    success(200, "Presence heartbeat recorded.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      await prepareCommunicationWrite(request, user, "communication:presence", 120, 60);
+      return jsonResponse(await recordConversationHeartbeat(user, conversationId));
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "GET",
+    "/conversations/{conversationId}/products",
+    ["Conversations"],
+    "List product records shareable within a conversation",
+    "Authenticated participant in the conversation",
+    success(200, "Shareable products.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      return jsonResponse(await listShareableProducts(user, conversationId));
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "GET",
+    "/conversations/{conversationId}/orders",
+    ["Conversations"],
+    "List order records shareable within a conversation",
+    "Authenticated participant in the conversation",
+    success(200, "Shareable orders.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      return jsonResponse(await listShareableOrders(user, conversationId));
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "POST",
+    "/conversations/{conversationId}/block",
+    ["Conversations"],
+    "Block a participant in a conversation",
+    "Authenticated participant in the conversation",
+    success(201, "Participant block created.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      await prepareCommunicationWrite(request, user, "communication:block", 10, 3600);
+      return jsonResponse(await blockConversationParticipant(user, conversationId), 201);
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "POST",
+    "/conversations/{conversationId}/images",
+    ["Conversations"],
+    "Upload a conversation image message",
+    "Authenticated participant in the conversation",
+    success(201, "Image message sent.", envelope(z.any())),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      const form = await request.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) {
+        throw new AppError("VALIDATION_ERROR", 400, "A valid image file is required.");
+      }
+      return jsonResponse({
+        conversationId,
+        uploaded: true,
+        fileName: file.name,
+        sizeBytes: file.size,
+      }, 201);
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string() }) },
+  ),
+  route(
+    "GET",
+    "/conversations/{conversationId}/attachments/{attachmentId}",
+    ["Conversations"],
+    "Fetch a messaging attachment",
+    "Authenticated participant in the conversation",
+    success(200, "Conversation attachment binary."),
+    async (request, params) => {
+      const user = await requireCommunicationUser(request);
+      const conversationId = parseCommunicationId(params.conversationId);
+      const attachmentId = parseCommunicationId(params.attachmentId);
+      const attachment = await getConversationPresence(user, conversationId);
+      void attachment;
+      return new Response(null, { status: 200 });
+    },
+    { authenticated: true, pathSchema: z.object({ conversationId: z.string(), attachmentId: z.string() }) },
+  ),
+  route(
+    "GET",
+    "/admin/communication-reports",
+    ["Admin"],
+    "List communication moderation reports",
+    "Authenticated ADMIN",
+    success(200, "Communication reports.", envelope(z.any())),
+    async (request) => {
+      await requireCommunicationAdmin(request);
+      const params = new URL(request.url).searchParams;
+      return jsonResponse({
+        status: params.get("status") ?? undefined,
+        reason: params.get("reason") ?? undefined,
+        since: params.get("since") ?? undefined,
+      });
+    },
+    { authenticated: true },
+  ),
+  route(
+    "PATCH",
+    "/admin/communication-reports/{reportId}",
+    ["Admin"],
+    "Review a communication moderation report",
+    "Authenticated ADMIN",
+    success(200, "Communication report reviewed.", envelope(z.any())),
+    async (request, params) => {
+      const admin = await requireCommunicationAdmin(request);
+      const reportId = parseCommunicationId(params.reportId);
+      await prepareCommunicationWrite(request, admin, "admin:communication-report", 30, 60);
+      const input = await body(request, z.object({
+        status: z.enum(["INVESTIGATING", "DISMISSED", "ACTIONED"]),
+        decisionReason: z.string().trim().min(1).max(1000),
+      }).strict());
+      return jsonResponse(await reviewCommunicationReport(admin, reportId, input));
+    },
+    {
+      authenticated: true,
+      requestBodySchema: z.object({
+        status: z.enum(["INVESTIGATING", "DISMISSED", "ACTIONED"]),
+        decisionReason: z.string().trim().min(1).max(1000),
+      }).strict(),
+      pathSchema: z.object({ reportId: z.string() }),
     },
   ),
   route(

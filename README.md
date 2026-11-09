@@ -450,9 +450,12 @@ For full deployment instructions, see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.m
 
 - 🏛️ [System Architecture](docs/ARCHITECTURE.md)
 - 🗄️ [Database Architecture & Schema Specification](docs/database/README.md)
+- 🧾 [Database Reference](docs/database/DATABASE_REFERENCE.md)
 - 📊 [Mermaid Entity Relationship Diagram (ERD)](docs/database/erd.mmd)
 - 🔌 [REST API Reference](docs/api/README.md)
+- 📚 [Complete API Reference](docs/api/COMPLETE_API_REFERENCE.md)
 - 📜 [OpenAPI 3.0.3 Contract](docs/api/openapi.md)
+- 🏗️ [Backend Architecture](docs/BACKEND_ARCHITECTURE.md)
 - 🔐 [Authentication & Security](docs/AUTHENTICATION.md)
 - 💰 [Financial System & Ledger](docs/FINANCIAL_SYSTEM.md)
 - 📦 [Inventory & Order Fulfillment](docs/INVENTORY_AND_ORDERS.md)

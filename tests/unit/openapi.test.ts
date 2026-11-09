@@ -13,6 +13,9 @@ describe("OpenAPI contract", () => {
 
     expect(document.openapi).toBe("3.0.3");
     expect(paths["/api/v1/auth/login"]?.post).toBeDefined();
+    expect(paths["/api/v1/conversations"]?.get).toBeDefined();
+    expect(paths["/api/v1/conversations/{conversationId}/messages"]?.post).toBeDefined();
+    expect(paths["/api/v1/admin/communication-reports"]?.get).toBeDefined();
     expect(paths["/api/v1/vendor/onboarding"]?.patch?.security).toEqual([
       { sessionCookie: [] },
     ]);
