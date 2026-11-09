@@ -189,24 +189,28 @@ test("the mobile menu, theme toggle, and page layout work at phone width", async
 
 test("all custom homepage illustrations load", async ({ page }) => {
   await page.goto("/en");
-  const images = page.locator("main img");
-  const imageCount = await images.count();
 
-  expect(imageCount).toBeGreaterThan(0);
-  await images.evaluateAll((elements) => {
+  const featuredProductImages = page.locator("#featured-products img");
+  await expect(featuredProductImages).toHaveCount(8);
+
+  const customIllustrations = page.locator("main section:not(#featured-products) img");
+  const illustrationCount = await customIllustrations.count();
+
+  expect(illustrationCount).toBe(21);
+  await customIllustrations.evaluateAll((elements) => {
     elements
       .filter(
         (element): element is HTMLImageElement =>
           element instanceof HTMLImageElement,
       )
       .forEach((image) => {
-      image.loading = "eager";
+        image.loading = "eager";
       });
   });
 
   await expect
     .poll(() =>
-      images.evaluateAll(
+      customIllustrations.evaluateAll(
         (elements) =>
           elements.filter(
             (element) =>
@@ -216,9 +220,9 @@ test("all custom homepage illustrations load", async ({ page }) => {
           ).length,
       ),
     )
-    .toBe(imageCount);
+    .toBe(illustrationCount);
 
-  const imageSources = await images.evaluateAll((elements) =>
+  const illustrationSources = await customIllustrations.evaluateAll((elements) =>
     elements
       .filter(
         (element): element is HTMLImageElement =>
@@ -226,7 +230,13 @@ test("all custom homepage illustrations load", async ({ page }) => {
       )
       .map((image) => image.currentSrc),
   );
-  expect(new Set(imageSources).size).toBe(imageCount);
+
+  expect(illustrationSources.length).toBe(illustrationCount);
+  expect(new Set(illustrationSources).size).toBe(illustrationCount);
+  illustrationSources.forEach((source) => {
+    expect(source).toBeTruthy();
+    expect(source).not.toBe("about:blank");
+  });
 });
 
 test("search filters the featured products", async ({ page }) => {
